@@ -4,9 +4,6 @@ from typing import Any, Dict, List, Optional
 from .base_controller import GuitarProMixin
 from guitarpro.models import Beat, BeatStatus, Note, NoteType, Track
 
-PERCUSSION_CHANNEL = 9
-
-
 class EditOperationsController(GuitarProMixin):
     """Controller for reading and restructuring existing song content.
 
@@ -173,20 +170,6 @@ class EditOperationsController(GuitarProMixin):
     def _renumber_tracks(self) -> None:
         for i, track in enumerate(self.current_song.tracks):
             track.number = i + 1
-
-    def _free_channels(self, source: Track):
-        if source.isPercussionTrack:
-            return PERCUSSION_CHANNEL, PERCUSSION_CHANNEL
-        used = set()
-        for t in self.current_song.tracks:
-            used.update({t.channel.channel, t.channel.effectChannel})
-        free = [c for c in range(16) if c != PERCUSSION_CHANNEL and c not in used]
-        if len(free) >= 2:
-            return free[0], free[1]
-        if free:
-            return free[0], free[0]
-        # All 15 melodic channels in use: share the source's channels.
-        return source.channel.channel, source.channel.effectChannel
 
     # ----- note edits ----------------------------------------------------
 

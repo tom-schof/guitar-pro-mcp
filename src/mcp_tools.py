@@ -42,10 +42,11 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
             return {"status": "error", "message": f"Error getting tracks: {str(e)}"}
 
     @mcp.tool("get_track_notes")
-    def get_track_notes(ctx: Context, track_index: int) -> Dict[str, Any]:
-        """Get all notes from a specific track."""
+    def get_track_notes(ctx: Context, track_index: int, start_measure: int = 0,
+                        end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Get notes from a track, optionally for a measure range (0-based, end inclusive)."""
         try:
-            notes = controller.get_track_notes(track_index)
+            notes = controller.get_track_notes(track_index, start_measure, end_measure)
             return {"status": "success", "data": notes}
         except Exception as e:
             return {"status": "error", "message": f"Error getting track notes: {str(e)}"}

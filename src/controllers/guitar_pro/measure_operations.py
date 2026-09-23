@@ -1,3 +1,5 @@
+import copy
+
 from .base_controller import GuitarProMixin
 import guitarpro as gp
 from guitarpro.models import MeasureHeader, TimeSignature, KeySignature, Measure, Voice
@@ -15,26 +17,23 @@ class MeasureOperationsController(GuitarProMixin):
         if self.current_song is None:
             self.create_new_song()
             
+        headers = self.current_song.measureHeaders
         header = MeasureHeader()
+        if headers:
+            # Continue the previous measure's time and key signature.
+            prev = headers[-1]
+            header.number = prev.number + 1
+            header.start = prev.start + prev.length
+            header.timeSignature = copy.deepcopy(prev.timeSignature)
+            header.keySignature = prev.keySignature
+        else:
+            header.keySignature = KeySignature.CMajor
+        headers.append(header)
         
-        # Set up default time signature (4/4)
-        time_sig = TimeSignature()
-        time_sig.numerator = 4
-        time_sig.denominator.value = 4
-        header.timeSignature = time_sig
-        
-        # Set up default key signature (C major)
-        header.keySignature = KeySignature.CMajor
-        
-        # Add the header to the song
-        self.current_song.measureHeaders.append(header)
-        
-        # For each track, add a new measure with this header
+        # Each track gets a measure (with its default voices) filled with rests.
         for track in self.current_song.tracks:
             measure = Measure(track, header)
-            # Add a default voice
-            voice = Voice(measure)
-            measure.voices.append(voice)
+            self._fill_rests(measure)
             track.measures.append(measure)
             
         return len(self.current_song.measureHeaders) - 1
@@ -87,7 +86,9 @@ class MeasureOperationsController(GuitarProMixin):
         header = self.current_song.measureHeaders[measure_index]
         
         # Set the key signature
-        header.keySignature = gp.models.KeySignature(key)
+        if not -7 <= key <= 7:
+            raise ValueError("Key must be between -7 and 7")
+        header.keySignature = gp.models.KeySignature((key, 0))
         
         return True
         

@@ -1,6 +1,6 @@
 from typing import Dict, Any
 from .base_controller import GuitarProMixin
-from guitarpro.models import Song, Track, RepeatGroup
+from guitarpro.models import Color, DirectionSign, KeySignature, LyricLine, Lyrics, Marker, Song, Track
 from .track_operations import TrackOperationsController
 from .measure_operations import MeasureOperationsController
 from .note_operations import NoteOperationsController
@@ -44,19 +44,12 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
             self.current_song.title = title
             self.current_song.artist = artist
             
-            # Print debug info
-            print("Song instance created successfully")
-            
-            # Add a default track with 6 strings (standard guitar)
-            print("Adding track...")
-            track_index = self.add_track("Guitar")
-            print(f"Track added at index {track_index}")
-            
-            # Add a default measure header and measure
-            # This is necessary for a valid Guitar Pro song
-            print("Adding measure header...")
-            measure_index = self.add_measure_header()
-            print(f"Measure header added at index {measure_index}")
+            # Song() already has one 6-string track and one measure.
+            track = self.current_song.tracks[0]
+            track.name = "Guitar"
+            track.channel.instrument = 24  # Acoustic Guitar
+            for measure in track.measures:
+                self._fill_rests(measure)
             
             # Set default tempo (120 BPM)
             self.current_song.tempo = 120
@@ -169,7 +162,8 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
             return False
             
         try:
-            self.current_song.lyrics = lyrics
+            lines = [LyricLine(1, lyrics)] + [LyricLine() for _ in range(Lyrics.maxLineCount - 1)]
+            self.current_song.lyrics = Lyrics(lines=lines)
             return True
         except Exception as e:
             print(f"Error setting lyrics: {e}")
@@ -293,48 +287,24 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
         Args:
             start_measure (int): Index of the first measure in the repeat group
             end_measure (int): Index of the last measure in the repeat group
-            repeat_type (str): Type of repeat ("normal", "alternate", "repeat")
-            repeat_count (int): Number of times to repeat
-            endings (list): List of ending numbers (e.g., [1, 2] for first and second endings)
+            repeat_type (str): Unused; Guitar Pro has one kind of repeat
+            repeat_count (int): Total number of times the group is played
+            endings (list): Passes on which end_measure is played (e.g. [1] for a first ending)
             
         Returns:
             bool: True if successful, False otherwise
         """
-        if self.current_song is None:
-            print("No song loaded")
-            return False
-            
-        try:
-            # Create a new repeat group
-            repeat_group = RepeatGroup()
-            
-            # Add the repeat group to the song
-            self.current_song.repeatGroups.append(repeat_group)
-            
-            # Update measure headers
-            for i in range(start_measure, end_measure + 1):
-                if i < len(self.current_song.measureHeaders):
-                    header = self.current_song.measureHeaders[i]
-                    header.repeatGroup = repeat_group
-                    
-                    # Set repeat open for first measure
-                    if i == start_measure:
-                        header.isRepeatOpen = True
-                        header.repeatClose = repeat_count
-                    
-                    # Set repeat close for last measure
-                    if i == end_measure:
-                        header.repeatClose = repeat_count
-                    
-                    # Set repeat alternatives if specified
-                    if endings and i == end_measure:
-                        header.repeatAlternative = max(endings)
-            
-            return True
-            
-        except Exception as e:
-            print(f"Error adding repeat group: {e}")
-            return False
+        self._ensure_song_loaded()
+        headers = self.current_song.measureHeaders
+        if not 0 <= start_measure <= end_measure < len(headers):
+            raise ValueError(f"Invalid measure range {start_measure}-{end_measure}")
+        if repeat_count < 2:
+            raise ValueError("repeat_count must be at least 2")
+        headers[start_measure].isRepeatOpen = True
+        headers[end_measure].repeatClose = repeat_count - 1
+        if endings:
+            headers[end_measure].repeatAlternative = sum(1 << (n - 1) for n in endings)
+        return True
 
     def get_repeat_groups(self) -> list:
         """
@@ -345,36 +315,20 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
         """
         if self.current_song is None:
             return []
-            
-        try:
-            repeat_groups = []
-            for group in self.current_song.repeatGroups:
-                # Find the measures that belong to this repeat group
-                measures = []
-                for i, header in enumerate(self.current_song.measureHeaders):
-                    if header.repeatGroup == group:
-                        measures.append(i)
-                
-                # Get repeat count from the first measure with repeat close
-                repeat_count = 0
-                for header in group.measureHeaders:
-                    if header.repeatClose > 0:
-                        repeat_count = header.repeatClose
-                        break
-                
-                repeat_groups.append({
-                    "type": "normal",  # PyGuitarPro doesn't have different repeat types
-                    "repeat_count": repeat_count,
-                    "endings": [header.repeatAlternative for header in group.measureHeaders if header.repeatAlternative > 0],
-                    "measures": measures,
-                    "is_closed": group.isClosed
+        groups, start = [], 0
+        for i, header in enumerate(self.current_song.measureHeaders):
+            if header.isRepeatOpen:
+                start = i
+            if header.repeatClose > -1:
+                groups.append({
+                    "type": "normal",
+                    "repeat_count": header.repeatClose + 1,
+                    "endings": [n + 1 for n in range(8) if header.repeatAlternative >> n & 1],
+                    "measures": list(range(start, i + 1)),
+                    "is_closed": True,
                 })
-            
-            return repeat_groups
-            
-        except Exception as e:
-            print(f"Error getting repeat groups: {e}")
-            return []
+                start = i + 1
+        return groups
 
     def add_section(self, start_measure: int, end_measure: int, name: str, 
                    text: str = None, color: tuple = None) -> bool:
@@ -396,14 +350,12 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
             return False
             
         try:
-            # Add section text to the first measure
+            # Guitar Pro sections are markers on the first measure.
             if start_measure < len(self.current_song.measureHeaders):
                 header = self.current_song.measureHeaders[start_measure]
-                header.text = name
-                if text:
-                    header.text += f"\n{text}"
+                header.marker = Marker(title=f"{name} {text}" if text else name)
                 if color:
-                    header.color = color
+                    header.marker.color = Color(*color)
             
             return True
             
@@ -422,54 +374,13 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
             return []
             
         try:
-            sections = []
-            current_section = None
-            
-            for i, header in enumerate(self.current_song.measureHeaders):
-                # Check for section markers in the measure
-                section_text = None
-                
-                # Look for text in the measure
-                for track in self.current_song.tracks:
-                    if i < len(track.measures):
-                        measure = track.measures[i]
-                        for voice in measure.voices:
-                            for beat in voice.beats:
-                                if beat.text:
-                                    text = beat.text.lower()
-                                    if any(marker in text for marker in ['intro', 'verse', 'chorus', 'bridge', 'solo', 'outro', 'coda']):
-                                        section_text = beat.text
-                                        break
-                            if section_text:
-                                break
-                        if section_text:
-                            break
-                
-                # Check for markers in the measure header
-                if not section_text and header.marker:
-                    text = header.marker.title.lower()
-                    if any(marker in text for marker in ['intro', 'verse', 'chorus', 'bridge', 'solo', 'outro', 'coda']):
-                        section_text = header.marker.title
-                
-                if section_text:
-                    # Start a new section
-                    if current_section is None or current_section["end_measure"] < i - 1:
-                        if current_section is not None:
-                            sections.append(current_section)
-                        current_section = {
-                            "name": section_text,
-                            "start_measure": i,
-                            "end_measure": i
-                        }
-                    else:
-                        # Extend current section
-                        current_section["end_measure"] = i
-            
-            # Add the last section if exists
-            if current_section is not None:
-                sections.append(current_section)
-            
-            return sections
+            # Each marker starts a section that runs until the next marker.
+            headers = self.current_song.measureHeaders
+            starts = [i for i, h in enumerate(headers) if h.marker]
+            return [{"name": headers[i].marker.title,
+                     "start_measure": i,
+                     "end_measure": (starts[n + 1] if n + 1 < len(starts) else len(headers)) - 1}
+                    for n, i in enumerate(starts)]
             
         except Exception as e:
             logger.error(f"Error getting sections: {e}")
@@ -492,7 +403,7 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
         try:
             if measure_index < len(self.current_song.measureHeaders):
                 header = self.current_song.measureHeaders[measure_index]
-                header.isCoda = True
+                header.direction = DirectionSign('Coda')
                 return True
             return False
             
@@ -517,7 +428,7 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
         try:
             if measure_index < len(self.current_song.measureHeaders):
                 header = self.current_song.measureHeaders[measure_index]
-                header.isDoubleBar = True
+                header.hasDoubleBar = True
                 return True
             return False
             
@@ -542,41 +453,38 @@ class SongOperationsController(TrackOperationsController, MeasureOperationsContr
                 "markers": []
             }
             
-            # Add markers from measures
-            for track in self.current_song.tracks:
+            # Song-wide markers live on the measure headers.
+            for measure_index, header in enumerate(self.current_song.measureHeaders):
+                if header.marker:
+                    structure["markers"].append({
+                        "type": "marker",
+                        "text": header.marker.title,
+                        "measure": measure_index
+                    })
+                if header.hasDoubleBar:
+                    structure["markers"].append({
+                        "type": "double_bar",
+                        "measure": measure_index
+                    })
+                if header.direction:
+                    structure["markers"].append({
+                        "type": "direction",
+                        "text": header.direction.name,
+                        "measure": measure_index
+                    })
+            
+            # Beat text belongs to one track.
+            for track_index, track in enumerate(self.current_song.tracks):
                 for measure_index, measure in enumerate(track.measures):
-                    # Check measure header marker
-                    if measure.header.marker:
-                        structure["markers"].append({
-                            "type": "marker",
-                            "text": measure.header.marker.title,
-                            "measure": measure_index
-                        })
-                    
-                    # Check for double bar
-                    if measure.header.hasDoubleBar:
-                        structure["markers"].append({
-                            "type": "double_bar",
-                            "measure": measure_index
-                        })
-                    
-                    # Check for text in beats
                     for voice in measure.voices:
                         for beat_index, beat in enumerate(voice.beats):
                             if beat.text:
                                 structure["markers"].append({
                                     "type": "text",
                                     "text": beat.text,
+                                    "track": track_index,
                                     "measure": measure_index,
                                     "beat": beat_index
-                                })
-                            
-                            # Check for direction signs
-                            if beat.voice.measure.header.direction:
-                                structure["markers"].append({
-                                    "type": "direction",
-                                    "text": beat.voice.measure.header.direction.name,
-                                    "measure": measure_index
                                 })
             
             return structure

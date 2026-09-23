@@ -1,7 +1,7 @@
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from .base_controller import GuitarProMixin
 import guitarpro as gp
-from guitarpro.models import Song, Track, Measure, Voice
+from guitarpro.models import Song, Track, Measure, Voice, NoteType
 import logging
 
 logger = logging.getLogger(__name__)
@@ -27,15 +27,18 @@ class TrackOperationsController(GuitarProMixin):
                 "instrument": track.channel.instrument,
                 "is_percussion": track.isPercussionTrack
             }
-            for i, track in enumerate(self.current_song.tracks) if not track.isPercussionTrack
+            for i, track in enumerate(self.current_song.tracks)
         ]
         
-    def get_track_notes(self, track_index: int) -> List[Dict[str, Any]]:
+    def get_track_notes(self, track_index: int, start_measure: int = 0,
+                        end_measure: Optional[int] = None) -> List[Dict[str, Any]]:
         """
-        Get all notes from a specific track.
+        Get the notes from a specific track.
         
         Args:
             track_index (int): Index of the track
+            start_measure (int): First measure to include (0-based)
+            end_measure (int, optional): Last measure to include (inclusive); defaults to the end
             
         Returns:
             list: List of notes with their properties
@@ -49,39 +52,27 @@ class TrackOperationsController(GuitarProMixin):
             return []
             
         track = self.current_song.tracks[track_index]
+        last = len(track.measures) - 1 if end_measure is None else min(end_measure, len(track.measures) - 1)
         notes = []
         
-        logger.info(f"Extracting notes from track {track_index} ({track.name})")
-        logger.info(f"Track has {len(track.measures)} measures")
-        
-        for measure_index, measure in enumerate(track.measures):
-            logger.debug(f"Processing measure {measure_index}")
-            logger.debug(f"Measure has {len(measure.voices)} voices")
-            
+        for measure_index in range(max(start_measure, 0), last + 1):
+            measure = track.measures[measure_index]
             for voice_index, voice in enumerate(measure.voices):
-                logger.debug(f"Processing voice {voice_index}")
-                logger.debug(f"Voice has {len(voice.beats)} beats")
-                
                 for beat_index, beat in enumerate(voice.beats):
-                    logger.debug(f"Processing beat {beat_index}")
-                    logger.debug(f"Beat has {len(beat.notes)} notes")
-                    
                     for note in beat.notes:
-                        note_info = {
+                        notes.append({
                             "measure": measure_index,
                             "voice": voice_index,
                             "beat": beat_index,
                             "string": note.string,
                             "value": note.value,
+                            "pitch": note.realValue,
                             "duration": beat.duration.value,
                             "is_dotted": beat.duration.isDotted,
-                            "is_rest": beat.duration.isRest,
-                            "has_tie": note.isTiedNote
-                        }
-                        logger.debug(f"Found note: {note_info}")
-                        notes.append(note_info)
+                            "type": note.type.name,
+                            "has_tie": note.type == NoteType.tie
+                        })
         
-        logger.info(f"Total notes found in track: {len(notes)}")
         return notes
         
     def add_track(self, name: str) -> int:
@@ -99,16 +90,14 @@ class TrackOperationsController(GuitarProMixin):
             self.current_song = Song()
             self.current_song.title = "New Song"
             
-        # Create a new track with standard guitar tuning - pass the song to the Track constructor
-        track = Track(self.current_song)
+        # Track() already has standard 6-string tuning (E A D G B E) and one
+        # measure per song measure header.
+        track = Track(self.current_song, number=len(self.current_song.tracks) + 1)
         track.name = name
         track.channel.instrument = 24  # Acoustic Guitar
-        
-        # Standard guitar tuning (E, A, D, G, B, E)
-        string_tuning = [64, 59, 55, 50, 45, 40]
-        for i, tune in enumerate(string_tuning):
-            string = gp.models.GuitarString(number=i+1, value=tune)
-            track.strings.append(string)
+        track.channel.channel, track.channel.effectChannel = self._free_channels()
+        for measure in track.measures:
+            self._fill_rests(measure)
             
         self.current_song.tracks.append(track)
         return len(self.current_song.tracks) - 1
@@ -188,45 +177,19 @@ class TrackOperationsController(GuitarProMixin):
             print(f"Invalid track index: {track_index}")
             return False
             
-        try:
-            track = self.current_song.tracks[track_index]
-            
-            # Iterate through all measures, voices, beats, and notes
-            for measure in track.measures:
-                for voice in measure.voices:
-                    for beat in voice.beats:
-                        for note in beat.notes:
-                            # Skip tied notes (they reference the same pitch as a previous note)
-                            if note.isTiedNote:
-                                continue
-                                
-                            # Calculate new fret position based on string and current value
-                            string_obj = None
-                            for s in track.strings:
-                                if s.number == note.string:
-                                    string_obj = s
-                                    break
-                            
-                            if string_obj is None:
-                                continue
-                                
-                            # Calculate the current absolute pitch
-                            current_pitch = string_obj.value + note.value
-                            
-                            # Calculate the new absolute pitch
-                            new_pitch = current_pitch + semitones
-                            
-                            # Calculate new fret value based on string tuning
-                            new_fret = new_pitch - string_obj.value
-                            
-                            # Only update if the new fret is valid (not negative)
-                            if new_fret >= 0:
-                                note.value = new_fret
-                            
-            return True
-        except Exception as e:
-            print(f"Error transposing track: {e}")
-            return False
+        track = self.current_song.tracks[track_index]
+        strings = {s.number for s in track.strings}
+        notes = [note for measure in track.measures for voice in measure.voices
+                 for beat in voice.beats for note in beat.notes
+                 if note.type != NoteType.dead and note.string in strings]
+        # All-or-nothing: refuse if any note would leave the fretboard.
+        bad = [n for n in notes if not 0 <= n.value + semitones <= track.fretCount]
+        if bad:
+            raise ValueError(f"{len(bad)} notes would fall outside frets 0-{track.fretCount}; "
+                             f"re-finger them first (e.g. with edit_notes)")
+        for note in notes:
+            note.value += semitones
+        return True
             
     def get_track_tab(self, track_index: int) -> str:
         """

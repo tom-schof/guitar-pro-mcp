@@ -1,3 +1,6 @@
+import os
+import tempfile
+
 from guitarpro import parse, write
 from .base_controller import GuitarProMixin
 import logging
@@ -33,7 +36,16 @@ class FileOperationsController(GuitarProMixin):
     def save_file(self, file_path: str) -> None:
         """Save the current song to a Guitar Pro file."""
         self._ensure_song_loaded()
-        write(self.current_song, file_path)
+        # Write to a temp file first so a failed write can't clobber the target.
+        directory, name = os.path.split(os.path.abspath(file_path))
+        fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=f".{name}.", suffix=os.path.splitext(name)[1])
+        os.close(fd)
+        try:
+            write(self.current_song, tmp_path)
+            os.replace(tmp_path, file_path)
+        except BaseException:
+            os.remove(tmp_path)
+            raise
             
     def export_to_midi(self, file_path: str) -> bool:
         """

@@ -5,6 +5,7 @@ from .track_operations import TrackOperationsController
 from .measure_operations import MeasureOperationsController
 from .note_operations import NoteOperationsController
 from .edit_operations import EditOperationsController
+from .chord_operations import ChordOperationsController
 
 class GuitarProController(GuitarProMixin):
     """Main controller for Guitar Pro operations."""
@@ -18,12 +19,13 @@ class GuitarProController(GuitarProMixin):
         self.measure_ops = MeasureOperationsController()
         self.note_ops = NoteOperationsController()
         self.edit_ops = EditOperationsController()
+        self.chord_ops = ChordOperationsController()
         
     def __getattr__(self, name):
         """Delegate method calls to the appropriate operation handler."""
         # Try each operation handler in order
         for handler in [self.file_ops, self.song_ops, self.track_ops, 
-                       self.measure_ops, self.note_ops, self.edit_ops]:
+                       self.measure_ops, self.note_ops, self.edit_ops, self.chord_ops]:
             if hasattr(handler, name):
                 # Create a method that calls the handler's method
                 def create_method(handler, method_name):

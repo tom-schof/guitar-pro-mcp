@@ -1,5 +1,6 @@
 from .base_controller import GuitarProMixin
-from guitarpro.models import Note, Beat, BeatStatus, Voice, Duration, NoteType
+from guitarpro.models import (Note, Beat, BeatStatus, Voice, Duration, NoteType, BendEffect,
+                              BendPoint, BendType, NaturalHarmonic, SlideType)
 
 class NoteOperationsController(GuitarProMixin):
     """Controller for Guitar Pro note operations."""
@@ -225,21 +226,22 @@ class NoteOperationsController(GuitarProMixin):
             
             # Set advanced effects
             if is_bend:
-                note.effect.bend = True
+                # Full-tone bend; point values are quarter tones.
+                note.effect.bend = BendEffect(type=BendType.bend, value=100, points=[
+                    BendPoint(0, 0), BendPoint(6, 4), BendPoint(12, 4)])
             if is_harmonic:
-                note.effect.isHarmonic = True
+                note.effect.harmonic = NaturalHarmonic()
             if is_slide:
-                note.effect.isSlide = True
+                note.effect.slides = [SlideType.shiftSlideTo]
             if is_vibrato:
-                note.effect.isVibrato = True
+                note.effect.vibrato = True
             if is_ghost:
-                note.effect.isGhostNote = True
+                note.effect.ghostNote = True
             if is_dead:
-                note.effect.isDeadNote = True
-            if is_hammer_on:
-                note.effect.isHammerOn = True
-            if is_pull_off:
-                note.effect.isPullOff = True
+                note.type = NoteType.dead
+            if is_hammer_on or is_pull_off:
+                # Guitar Pro uses one legato flag for both hammer-ons and pull-offs.
+                note.effect.hammer = True
             
             # Add the note to the beat
             beat.notes.append(note)

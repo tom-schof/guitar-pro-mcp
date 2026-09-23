@@ -1,6 +1,11 @@
 from .base_controller import GuitarProMixin
 from guitarpro.models import Chord, Barre, PitchClass, ChordType, ChordExtension, ChordAlteration, Fingering
 
+
+def _enum(cls, value):
+    return cls[value] if isinstance(value, str) else cls(value)
+
+
 class ChordOperationsController(GuitarProMixin):
     """Controller for Guitar Pro chord operations."""
 
@@ -38,44 +43,40 @@ class ChordOperationsController(GuitarProMixin):
             beat = measure.voices[0].beats[beat_index]
             
             # Create a new chord
-            chord = Chord()
+            chord = Chord(len(track.strings), sharp=False, add=False, firstFret=1,
+                          show=True, newFormat=True)
             
-            # Set chord properties
+            # Set chord properties; enums accept a name ("major") or a value
             if "name" in chord_data:
                 chord.name = chord_data["name"]
             if "root" in chord_data:
                 chord.root = PitchClass(chord_data["root"])
             if "type" in chord_data:
-                chord.type = ChordType(chord_data["type"])
+                chord.type = _enum(ChordType, chord_data["type"])
             if "extension" in chord_data:
-                chord.extension = ChordExtension(chord_data["extension"])
+                chord.extension = _enum(ChordExtension, chord_data["extension"])
             if "bass" in chord_data:
                 chord.bass = PitchClass(chord_data["bass"])
             if "tonality" in chord_data:
-                chord.tonality = ChordAlteration(chord_data["tonality"])
+                chord.tonality = _enum(ChordAlteration, chord_data["tonality"])
             if "fifth" in chord_data:
-                chord.fifth = ChordAlteration(chord_data["fifth"])
+                chord.fifth = _enum(ChordAlteration, chord_data["fifth"])
             if "ninth" in chord_data:
-                chord.ninth = ChordAlteration(chord_data["ninth"])
+                chord.ninth = _enum(ChordAlteration, chord_data["ninth"])
             if "eleventh" in chord_data:
-                chord.eleventh = ChordAlteration(chord_data["eleventh"])
+                chord.eleventh = _enum(ChordAlteration, chord_data["eleventh"])
             if "firstFret" in chord_data:
                 chord.firstFret = chord_data["firstFret"]
             if "strings" in chord_data:
+                # Fret per string, string 1 first; -1 = not played
                 chord.strings = chord_data["strings"]
             if "barres" in chord_data:
                 for barre_data in chord_data["barres"]:
-                    barre = Barre()
-                    barre.fret = barre_data["fret"]
-                    barre.startString = barre_data["startString"]
-                    barre.endString = barre_data["endString"]
-                    chord.barres.append(barre)
+                    chord.barres.append(Barre(barre_data["fret"], barre_data["startString"],
+                                              barre_data["endString"]))
             if "fingerings" in chord_data:
-                for fingering_data in chord_data["fingerings"]:
-                    fingering = Fingering()
-                    fingering.finger = fingering_data["finger"]
-                    fingering.string = fingering_data["string"]
-                    chord.fingerings.append(fingering)
+                # Finger per string (-1 open/muted, 0 thumb, 1 index ... 4 little)
+                chord.fingerings = [Fingering(f) for f in chord_data["fingerings"]]
             
             # Add the chord to the beat
             beat.effect.chord = chord
@@ -134,8 +135,8 @@ class ChordOperationsController(GuitarProMixin):
                 "eleventh": chord.eleventh.name if chord.eleventh else None,
                 "firstFret": chord.firstFret,
                 "strings": chord.strings,
-                "barres": [{"fret": barre.fret, "startString": barre.startString, "endString": barre.endString} for barre in chord.barres],
-                "fingerings": [{"finger": fingering.finger, "string": fingering.string} for fingering in chord.fingerings]
+                "barres": [{"fret": barre.fret, "startString": barre.start, "endString": barre.end} for barre in chord.barres],
+                "fingerings": [fingering.value for fingering in chord.fingerings]
             }
             
         except Exception as e:
