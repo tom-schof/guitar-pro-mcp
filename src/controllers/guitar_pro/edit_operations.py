@@ -34,8 +34,9 @@ class EditOperationsController(GuitarProMixin):
 
     def _note(self, track: Track, addr: Dict[str, int]) -> Note:
         beat = self._beat(track, addr["measure"], addr.get("voice", 0), addr["beat"])
+        # An optional "fret" picks between two notes clashing on one string.
         for note in beat.notes:
-            if note.string == addr["string"]:
+            if note.string == addr["string"] and addr.get("fret", note.value) == note.value:
                 return note
         raise ValueError(f"No note on string {addr['string']} at {addr}")
 
@@ -47,6 +48,32 @@ class EditOperationsController(GuitarProMixin):
             ticks.append(pos)
             pos += beat.duration.time
         return ticks
+
+    @staticmethod
+    def _all_beats(track: Track):
+        for measure in track.measures:
+            for voice in measure.voices:
+                yield from voice.beats
+
+    @staticmethod
+    def _repair_ties(track: Track) -> None:
+        """Turn tie notes whose preceding beat has no note on that string into normal notes.
+
+        Deleting or moving a note can strand the notes tied to it; Guitar Pro
+        would otherwise draw a tie from nothing.
+        """
+        for v in range(max((len(m.voices) for m in track.measures), default=0)):
+            prev = None
+            for measure in track.measures:
+                if v >= len(measure.voices):
+                    prev = None
+                    continue
+                for beat in measure.voices[v].beats:
+                    held = {n.string for n in prev.notes} if prev else set()
+                    for note in beat.notes:
+                        if note.type == NoteType.tie and note.string not in held:
+                            note.type = NoteType.normal
+                    prev = beat
 
     @staticmethod
     def _refresh_status(beat: Beat) -> None:
@@ -145,8 +172,13 @@ class EditOperationsController(GuitarProMixin):
 
     # ----- track structure -----------------------------------------------
 
-    def duplicate_track(self, track_index: int, name: Optional[str] = None) -> int:
-        """Deep-copy a track (measures, notes, tuning, settings) and append it."""
+    def duplicate_track(self, track_index: int, name: Optional[str] = None,
+                        clear_notes: bool = False) -> int:
+        """Deep-copy a track (measures, notes, tuning, settings) and append it.
+
+        With clear_notes, the copy keeps the rhythm (every beat, now a rest)
+        but no notes, ready to receive notes from move_notes.
+        """
         source = self._track(track_index)
         song = self.current_song
         # Share the song and measure headers instead of copying them.
@@ -156,6 +188,11 @@ class EditOperationsController(GuitarProMixin):
         new_track = copy.deepcopy(source, memo)
         new_track.name = name or f"{source.name} (copy)"
         new_track.channel.channel, new_track.channel.effectChannel = self._free_channels(source)
+        if clear_notes:
+            for beat in self._all_beats(new_track):
+                if beat.notes:
+                    beat.notes = []
+                    beat.status = BeatStatus.rest
         song.tracks.append(new_track)
         self._renumber_tracks()
         return len(song.tracks) - 1
@@ -182,6 +219,7 @@ class EditOperationsController(GuitarProMixin):
             if note in beat.notes:
                 beat.notes.remove(note)
             self._refresh_status(beat)
+        self._repair_ties(track)
         return len(targets)
 
     def edit_notes(self, track_index: int, edits: List[Dict[str, Any]]) -> int:
@@ -270,4 +308,76 @@ class EditOperationsController(GuitarProMixin):
             dst_beat.notes.append(note)
             self._refresh_status(src_beat)
             self._refresh_status(dst_beat)
+        self._repair_ties(src)
+        self._repair_ties(dst)
         return len(plan)
+
+    # ----- splitting -----------------------------------------------------
+
+    def split_track(self, track_index: int, mode: str, name: Optional[str] = None,
+                    dest_track: Optional[int] = None, start_measure: int = 0,
+                    end_measure: Optional[int] = None, split_pitch: Optional[int] = None,
+                    strings: Optional[List[int]] = None, min_gap: int = 0,
+                    notes: Optional[List[Dict[str, int]]] = None) -> Dict[str, Any]:
+        """Move a selection of notes out of a track into another track.
+
+        Modes (applied within the measure range):
+        - "pitch": notes with MIDI pitch >= split_pitch.
+        - "top_note": the highest note of each beat with 2+ notes, if it is at
+          least min_gap semitones above the next note; a lone note moves only
+          if split_pitch is given and it is >= split_pitch.
+        - "strings": notes on the given strings.
+        - "notes": the given note addresses.
+
+        Without dest_track, a new track with the source's rhythm is created.
+        Nothing changes if no note matches or any move is invalid.
+        """
+        src = self._track(track_index)
+        if mode == "notes":
+            if not notes:
+                raise ValueError("mode 'notes' needs notes")
+            selected = list(notes)
+        else:
+            if mode == "pitch" and split_pitch is None:
+                raise ValueError("mode 'pitch' needs split_pitch")
+            if mode == "strings" and not strings:
+                raise ValueError("mode 'strings' needs strings")
+            if mode not in ("pitch", "top_note", "strings"):
+                raise ValueError(f"Unknown mode {mode!r}; use pitch, top_note, strings or notes")
+            last = len(src.measures) - 1 if end_measure is None else min(end_measure, len(src.measures) - 1)
+            selected = []
+            for m in range(start_measure, last + 1):
+                for v, voice in enumerate(src.measures[m].voices):
+                    for b, beat in enumerate(voice.beats):
+                        picked = self._split_pick(beat, mode, split_pitch, strings, min_gap)
+                        selected += [{"measure": m, "voice": v, "beat": b, "string": n.string}
+                                     for n in picked]
+            if not selected:
+                raise ValueError("No notes matched; nothing changed")
+        if dest_track is None:
+            dest = self.duplicate_track(track_index, name or f"{src.name} (split)", clear_notes=True)
+            try:
+                moved = self.move_notes(track_index, dest, selected)
+            except Exception:
+                self.delete_track(dest)
+                raise
+        else:
+            if dest_track == track_index:
+                raise ValueError("dest_track must differ from track_index")
+            dest = dest_track
+            moved = self.move_notes(track_index, dest, selected)
+        return {"track_index": dest, "moved": moved}
+
+    @staticmethod
+    def _split_pick(beat: Beat, mode: str, split_pitch: Optional[int],
+                    strings: Optional[List[int]], min_gap: int) -> List[Note]:
+        if not beat.notes:
+            return []
+        if mode == "pitch":
+            return [n for n in beat.notes if n.realValue >= split_pitch]
+        if mode == "strings":
+            return [n for n in beat.notes if n.string in strings]
+        ordered = sorted(beat.notes, key=lambda n: n.realValue, reverse=True)
+        if len(ordered) >= 2:
+            return [ordered[0]] if ordered[0].realValue - ordered[1].realValue >= min_gap else []
+        return [ordered[0]] if split_pitch is not None and ordered[0].realValue >= split_pitch else []

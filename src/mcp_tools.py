@@ -375,10 +375,11 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
             return {"status": "error", "message": f"Error finding playability issues: {str(e)}"}
 
     @mcp.tool("duplicate_track")
-    def duplicate_track(ctx: Context, track_index: int, name: Optional[str] = None) -> Dict[str, Any]:
-        """Copy a track with all its notes. Split a merged part by duplicating it, then deleting notes from each copy."""
+    def duplicate_track(ctx: Context, track_index: int, name: Optional[str] = None,
+                        clear_notes: bool = False) -> Dict[str, Any]:
+        """Copy a track with all its notes (or, with clear_notes, only its rhythm as rests)."""
         try:
-            new_index = controller.duplicate_track(track_index, name)
+            new_index = controller.duplicate_track(track_index, name, clear_notes)
             return {"status": "success", "message": f"Duplicated track {track_index}", "track_index": new_index}
         except Exception as e:
             return {"status": "error", "message": f"Error duplicating track: {str(e)}"}
@@ -432,3 +433,59 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
             return {"status": "success", "message": f"Moved {count} notes"}
         except Exception as e:
             return {"status": "error", "message": f"Error moving notes: {str(e)}"}
+
+    # ----- splitting and analysis ----------------------------------------
+
+    @mcp.tool("analyze_track")
+    def analyze_track(ctx: Context, track_index: int, start_measure: int = 0,
+                      end_measure: Optional[int] = None, melody_gap: int = 7,
+                      max_fret_span: int = 5) -> Dict[str, Any]:
+        """Say whether a track mixes melody, chords and bass, and how to split it.
+
+        Returns beat textures, sections of similar texture, playability issue
+        counts, a suggested split pitch and a suggested split_track call.
+        """
+        try:
+            return {"status": "success",
+                    "data": controller.analyze_track(track_index, start_measure, end_measure,
+                                                     melody_gap, max_fret_span)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error analyzing track: {str(e)}"}
+
+    @mcp.tool("split_track")
+    def split_track(ctx: Context, track_index: int, mode: str, name: Optional[str] = None,
+                    dest_track: Optional[int] = None, start_measure: int = 0,
+                    end_measure: Optional[int] = None, split_pitch: Optional[int] = None,
+                    strings: Optional[List[int]] = None, min_gap: int = 0,
+                    notes: Optional[List[Dict[str, int]]] = None) -> Dict[str, Any]:
+        """Move part of a track into a new track (or dest_track), keeping rhythm aligned.
+
+        mode: "pitch" (MIDI pitch >= split_pitch), "top_note" (highest note of
+        each chord at least min_gap above the next; lone notes only if >=
+        split_pitch), "strings" (notes on the given strings) or "notes"
+        (explicit addresses). Limit with start_measure/end_measure and call
+        again with dest_track to use different rules per section. All-or-nothing.
+        """
+        try:
+            result = controller.split_track(track_index, mode, name, dest_track, start_measure,
+                                            end_measure, split_pitch, strings, min_gap, notes)
+            return {"status": "success", "message": f"Moved {result['moved']} notes", **result}
+        except Exception as e:
+            return {"status": "error", "message": f"Error splitting track: {str(e)}"}
+
+    @mcp.tool("suggest_fingering")
+    def suggest_fingering(ctx: Context, track_index: int, start_measure: int = 0,
+                          end_measure: Optional[int] = None, max_fret_span: int = 5,
+                          max_position_jump: int = 7, apply: bool = False) -> Dict[str, Any]:
+        """Re-finger a passage (same pitches) to remove stretches, string clashes and jumps.
+
+        Returns edit_notes-style edits and before/after issue counts; apply=true
+        makes the edits. Beats with more notes than strings are listed as
+        unplayable_beats and need splitting or deleting instead.
+        """
+        try:
+            return {"status": "success",
+                    "data": controller.suggest_fingering(track_index, start_measure, end_measure,
+                                                         max_fret_span, max_position_jump, apply)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error suggesting fingering: {str(e)}"}
