@@ -203,19 +203,22 @@ def test_retune_refuses_too_many_notes(ctl):
     assert notes_at(ctl, 0, 2, 1)[-1] == (6, 2)
 
 
-def test_split_parts_melody_harmony_rhythm(ctl):
-    beat = ctl.current_song.tracks[0].measures[1].voices[0].beats[0]
-    beat.notes.append(Note(beat, value=9, string=2, type=NoteType.normal))  # G#4 under the melody
-    beat.notes = [n for n in beat.notes if n.string != 2 or n.value == 9]
-    result = ctl.split_parts(0, melody_name="Melody")
+def test_split_parts_moves_chords_and_keeps_lead_whole(ctl):
+    track = ctl.current_song.tracks[0]
+    # Measure 1: the chord rings (tied) under the melody; measure 2 beat 1: a low
+    # arpeggio note (G3) with no chord ringing stays in the lead.
+    beats = track.measures[1].voices[0].beats
+    beats[1].notes += [Note(beats[1], value=f, string=s, type=NoteType.tie) for s, f in CHORD]
+    low = track.measures[2].voices[0].beats[1]
+    low.notes = [Note(low, value=0, string=3, type=NoteType.normal)]
+    result = ctl.split_parts(0, melody_name="Lead", rhythm_name="Rhythm")
     roundtrip(ctl)
-    names = [t.name for t in ctl.current_song.tracks]
-    assert names == ["Melody", "Merged (Rhythm)", "Merged (Harmony)"]
-    assert result["moved"] == {"rhythm": 31, "harmony": 1}
-    assert notes_at(ctl, 0, 1, 0) == [(1, 12)]
-    assert notes_at(ctl, 0, 1, 1) == [(1, 10)]
-    assert notes_at(ctl, 2, 1, 0) == [(2, 9)]
-    assert notes_at(ctl, 1, 0, 0) == sorted(CHORD)
+    assert [t.name for t in ctl.current_song.tracks] == ["Lead", "Rhythm"]
+    assert result["moved_to_rhythm"] == 8 * 4 + 4
+    assert notes_at(ctl, 0, 1, 0) == [(1, 12)] and notes_at(ctl, 0, 1, 1) == [(1, 10)]
+    assert notes_at(ctl, 1, 1, 0) == sorted(CHORD)
+    assert [n.type for n in ctl.current_song.tracks[1].measures[1].voices[0].beats[1].notes] == [NoteType.tie] * 4
+    assert notes_at(ctl, 0, 2, 1) == [(3, 0)]
 
 
 def test_make_monophonic_cuts_held_and_moves_extra_notes(ctl):

@@ -136,74 +136,65 @@ class AnalysisOperationsController(EditOperationsController):
         }
 
     def split_parts(self, track_index: int, start_measure: int = 0,
-                    end_measure: Optional[int] = None, melody_min_pitch: int = 71,
-                    melody_gap: int = 5, harmony_min_pitch: int = 64,
-                    harmony_max_interval: int = 9, melody_name: Optional[str] = None,
-                    rhythm_name: Optional[str] = None,
-                    harmony_name: Optional[str] = None) -> Dict[str, Any]:
-        """Split a merged guitar part into melody (stays), rhythm and harmony tracks.
+                    end_measure: Optional[int] = None, rhythm_max_bottom: int = 57,
+                    rhythm_max_top: int = 69, bass_max: int = 52, chord_gap: int = 7,
+                    melody_name: Optional[str] = None,
+                    rhythm_name: Optional[str] = None) -> Dict[str, Any]:
+        """Move the rhythm-guitar chords out of a merged part; the lead line stays.
 
-        Per beat: a lone note is melody. In a chord, the top note is melody if
-        it is melody_gap+ semitones above the next note or at least
-        melody_min_pitch; the next note down is harmony if it is at least
-        harmony_min_pitch and within harmony_max_interval of the top; the rest
-        is rhythm. A chord whose top isn't melody is all rhythm, and so is
-        everything in measures analyze_track calls "chords". Tie notes follow
-        the note they continue. Run merge_voices first if both voices carry
-        the part. All-or-nothing.
+        Splits by role, not by pitch: a chord attacked together and built up
+        from the bass is rhythm. It starts at or below rhythm_max_bottom and
+        stacks notes within chord_gap semitones (an octave for the bottom
+        pair, up to a minor seventh while at or below rhythm_max_top). It
+        must have two notes, unless a rhythm chord is still ringing or the
+        note is at or below bass_max. Tie notes sustaining rhythm notes are
+        rhythm too. Everything else stays, so arpeggios and licks keep their
+        continuity. Measures analyze_track calls "chords"
+        go entirely to rhythm. Run merge_voices first if both voices carry
+        the part, and make_monophonic afterwards to pull double-stops out of
+        the lead into a harmony track. All-or-nothing.
         """
         track = self._track(track_index)
         measures = self._range(track, start_measure, end_measure)
         sections = self.analyze_track(track_index, start_measure, end_measure)["sections"]
         chord_only = {m for s in sections if s["texture"].startswith("chords")
                       for m in range(s["start_measure"], s["end_measure"] + 1)}
-        moves: Dict[str, List[Dict[str, int]]] = {"rhythm": [], "harmony": []}
+        moves: List[Dict[str, int]] = []
         for v in range(max((len(m.voices) for m in track.measures), default=0)):
-            prev_route: Dict[Tuple[int, int], str] = {}
+            prev_rhythm: set = set()  # (string, fret) of rhythm notes in the previous beat
             for m, b, beat in self._flat_voice(track, v):
-                route = {}
-                notes = sorted(beat.notes, key=lambda n: -n.realValue)
-                for i, n in enumerate(notes):
-                    key = (n.string, n.value)
-                    if n.type == NoteType.tie and key in prev_route:
-                        part = prev_route[key]
-                    elif m in chord_only:
-                        part = "rhythm"
-                    elif len(notes) == 1:
-                        part = "melody"
-                    else:
-                        top, second = notes[0].realValue, notes[1].realValue
-                        top_is_melody = top - second >= melody_gap or top >= melody_min_pitch
-                        if i == 0:
-                            part = "melody" if top_is_melody else "rhythm"
-                        elif (i == 1 and top_is_melody and n.realValue >= harmony_min_pitch
-                              and top - n.realValue <= harmony_max_interval):
-                            part = "harmony"
+                # Tie notes sustain whatever part their origin went to.
+                rhythm = {id(n) for n in beat.notes
+                          if n.type == NoteType.tie and (n.string, n.value) in prev_rhythm}
+                attacks = sorted((n for n in beat.notes if n.type != NoteType.tie), key=lambda n: n.realValue)
+                if m in chord_only:
+                    rhythm.update(id(n) for n in attacks)
+                else:
+                    cluster = attacks[:1]
+                    for n in attacks[1:]:
+                        gap = n.realValue - cluster[-1].realValue
+                        if (gap <= chord_gap or (gap == 12 and len(cluster) == 1)
+                                or (gap <= 10 and n.realValue <= rhythm_max_top)):
+                            cluster.append(n)
                         else:
-                            part = "rhythm"
-                    route[key] = part
-                    if part != "melody" and m in measures:
-                        moves[part].append({"measure": m, "voice": v, "beat": b,
-                                            "string": n.string, "fret": n.value})
-                prev_route = route
+                            break
+                    ringing = bool(rhythm)  # a rhythm chord is held into this beat
+                    if cluster and cluster[0].realValue <= rhythm_max_bottom and (
+                            len(cluster) >= 2 or ringing or cluster[0].realValue <= bass_max):
+                        rhythm.update(id(n) for n in cluster)
+                if m in measures:
+                    moves += [{"measure": m, "voice": v, "beat": b, "string": n.string, "fret": n.value}
+                              for n in beat.notes if id(n) in rhythm]
+                prev_rhythm = {(n.string, n.value) for n in beat.notes if id(n) in rhythm}
 
-        tracks_before = list(self.current_song.tracks)
-        backup = self._copy_track(track)
-        result: Dict[str, Any] = {"melody_track": track_index, "rhythm_track": None, "harmony_track": None}
-        try:
-            for part, name in (("rhythm", rhythm_name), ("harmony", harmony_name)):
-                if moves[part]:
-                    split = self.split_track(track_index, "notes", name or f"{track.name} ({part.title()})",
-                                             notes=moves[part])
-                    result[f"{part}_track"] = split["track_index"]
-        except Exception:
-            self.current_song.tracks[:] = tracks_before
-            self.current_song.tracks[track_index] = backup
-            self._renumber_tracks()
-            raise
+        result: Dict[str, Any] = {"melody_track": track_index, "rhythm_track": None}
+        if moves:
+            split = self.split_track(track_index, "notes", rhythm_name or f"{track.name} (Rhythm)",
+                                     notes=moves)
+            result["rhythm_track"] = split["track_index"]
         if melody_name:
             track.name = melody_name
-        result["moved"] = {part: len(notes) for part, notes in moves.items()}
+        result["moved_to_rhythm"] = len(moves)
         result["chord_only_measures"] = sorted(chord_only)
         return result
 

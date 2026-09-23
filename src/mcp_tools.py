@@ -536,26 +536,27 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
 
     @mcp.tool("split_parts")
     def split_parts(ctx: Context, track_index: int, start_measure: int = 0,
-                    end_measure: Optional[int] = None, melody_min_pitch: int = 71,
-                    melody_gap: int = 5, harmony_min_pitch: int = 64,
-                    harmony_max_interval: int = 9, melody_name: Optional[str] = None,
-                    rhythm_name: Optional[str] = None,
-                    harmony_name: Optional[str] = None) -> Dict[str, Any]:
-        """Split a merged guitar part: melody stays on the track, chords go to a new
-        rhythm track, a second line under the melody goes to a new harmony track.
+                    end_measure: Optional[int] = None, rhythm_max_bottom: int = 57,
+                    rhythm_max_top: int = 69, bass_max: int = 52, chord_gap: int = 7,
+                    melody_name: Optional[str] = None,
+                    rhythm_name: Optional[str] = None) -> Dict[str, Any]:
+        """Move rhythm-guitar chords out of a merged part into a new track; the lead stays.
 
-        Chord tops count as melody when melody_gap+ semitones above the next
-        note or >= melody_min_pitch (MIDI); measures with only chords go to
-        rhythm. Typical pipeline: merge_voices, split_parts, make_monophonic
-        (melody, dest_track=harmony), retune_track(reduce_chords=true) and
-        suggest_fingering(apply=true) on each part, save_guitar_pro.
+        Splits by role, not pitch: chords attacked together from the bass
+        (lowest note <= rhythm_max_bottom, stacked within chord_gap semitones)
+        and the ties sustaining them go to rhythm; arpeggios and licks stay
+        whole. Typical pipeline: merge_voices (if two voices), split_parts,
+        make_monophonic(lead, dest_track=new harmony track) if a single-line
+        lead is wanted, retune_track(reduce_chords=true) and
+        suggest_fingering(apply=true) on each part, save to a new file.
         """
         try:
             return {"status": "success",
                     "data": controller.split_parts(track_index, start_measure, end_measure,
-                                                   melody_min_pitch, melody_gap, harmony_min_pitch,
-                                                   harmony_max_interval, melody_name, rhythm_name,
-                                                   harmony_name)}
+                                                   rhythm_max_bottom=rhythm_max_bottom,
+                                                   rhythm_max_top=rhythm_max_top, bass_max=bass_max,
+                                                   chord_gap=chord_gap, melody_name=melody_name,
+                                                   rhythm_name=rhythm_name)}
         except Exception as e:
             return {"status": "error", "message": f"Error splitting parts: {str(e)}"}
 

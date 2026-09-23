@@ -514,7 +514,8 @@ class EditOperationsController(GuitarProMixin):
 
         Other new notes, with the tie notes that continue them, move to
         dest_track (onto another string if theirs is taken) or are deleted
-        when no dest_track is given. Other held notes are cut short.
+        when no dest_track is given. Duplicate pitches are deleted and other
+        held notes are cut short.
         All-or-nothing.
         """
         track = self._track(track_index)
@@ -532,11 +533,14 @@ class EditOperationsController(GuitarProMixin):
                     continue
                 attacks = [n for n in beat.notes if n.type != NoteType.tie]
                 keep = max(attacks or beat.notes, key=lambda n: n.realValue)
+                pitches = {keep.realValue}
                 for note in [n for n in beat.notes if n is not keep]:
+                    duplicate = note.realValue in pitches
+                    pitches.add(note.realValue)
                     chain = self._take_chain(flat, k, note)
                     if note.type == NoteType.tie:
                         counts["cut"] += 1
-                    elif work_dest is None:
+                    elif work_dest is None or duplicate:
                         counts["deleted"] += 1
                     else:
                         self._transfer(chain, work, work_dest, v)
@@ -559,6 +563,8 @@ class EditOperationsController(GuitarProMixin):
                 raise ValueError(f"dest_track has no beat at tick {tick} in measure {m}")
             dst_beat = dst_voice.beats[ticks.index(tick)]
             pitch = note.realValue
+            if any(n.realValue == pitch for n in dst_beat.notes):
+                continue  # already sounding there
             used = {n.string for n in dst_beat.notes}
             if string is None:
                 # Same string if free, else any free string that reaches the pitch.

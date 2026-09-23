@@ -28,7 +28,7 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   (`get_measures`, `find_playability_issues`, `duplicate_track`, `delete_track`, `delete_notes`,
   `edit_notes`, `add_notes`, `move_notes`, `split_track`, `merge_voices`, `make_monophonic`).
 - `src/controllers/guitar_pro/analysis_operations.py`: `analyze_track` (does a track mix melody
-  and chords, and where should it be split), `split_parts` (melody/rhythm/harmony),
+  and chords, and where should it be split), `split_parts` (rhythm chords out, lead line stays),
   `suggest_fingering` (re-finger a passage with the same pitches, searching across neighbouring
   beats) and `retune_track` (new tuning and fret count; same pitches, re-fingered).
 - `src/utils/`: MIDI and JSON export and import.
@@ -47,10 +47,14 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   0-based, matching the output of `get_measures`. `string` is 1-based, as in Guitar Pro, and
   `voice` defaults to 0. Batch operations check every address before changing anything, so a
   batch either fully succeeds or changes nothing.
-- Arranging a merged transcription (what mandolin-anthem does): `merge_voices` →
-  `split_parts` → `make_monophonic(melody, dest_track=harmony)` →
-  `retune_track(reduce_chords=true)` and `suggest_fingering(apply=true)` on each part → save to
-  a **new** file. `analyze_track` and `find_playability_issues` show what to fix. For finer
+- Arranging a merged transcription (what mandolin-anthem does): `merge_voices` (only if two
+  voices carry the part) → `split_parts` → `duplicate_track(lead, clear_notes=true)` as a harmony
+  track → `make_monophonic(lead, dest_track=harmony)` → `retune_track(reduce_chords=true)` and
+  `suggest_fingering(apply=true)` on each part → save to a **new** file. Split by role and
+  continuity, not pitch alone: taking the top note of each beat shreds arpeggios across tracks.
+  That was the first attempt, and the user described the result as "gibberish". Start from a
+  MIDI-based `.gp5` export (single voice, 16th grid). The MusicXML import was full of
+  32nd/64th fragments. `analyze_track` and `find_playability_issues` show what to fix. For finer
   control, `split_track` can split by pitch, top note, string or explicit notes, one measure
   range at a time with `dest_track`. `split_track` creates a copy
   with the same rhythm but no notes (`duplicate_track(clear_notes=True)`) and uses `move_notes`,
