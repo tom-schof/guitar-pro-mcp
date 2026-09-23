@@ -2,7 +2,7 @@ import itertools
 import statistics
 from typing import Any, Dict, List, Optional, Tuple
 
-from guitarpro.models import Beat, NoteType, Track
+from guitarpro.models import Beat, GuitarString, NoteType, Track
 
 from .edit_operations import EditOperationsController
 
@@ -135,6 +135,78 @@ class AnalysisOperationsController(EditOperationsController):
             "sections": sections,
         }
 
+    def split_parts(self, track_index: int, start_measure: int = 0,
+                    end_measure: Optional[int] = None, melody_min_pitch: int = 71,
+                    melody_gap: int = 5, harmony_min_pitch: int = 64,
+                    harmony_max_interval: int = 9, melody_name: Optional[str] = None,
+                    rhythm_name: Optional[str] = None,
+                    harmony_name: Optional[str] = None) -> Dict[str, Any]:
+        """Split a merged guitar part into melody (stays), rhythm and harmony tracks.
+
+        Per beat: a lone note is melody. In a chord, the top note is melody if
+        it is melody_gap+ semitones above the next note or at least
+        melody_min_pitch; the next note down is harmony if it is at least
+        harmony_min_pitch and within harmony_max_interval of the top; the rest
+        is rhythm. A chord whose top isn't melody is all rhythm, and so is
+        everything in measures analyze_track calls "chords". Tie notes follow
+        the note they continue. Run merge_voices first if both voices carry
+        the part. All-or-nothing.
+        """
+        track = self._track(track_index)
+        measures = self._range(track, start_measure, end_measure)
+        sections = self.analyze_track(track_index, start_measure, end_measure)["sections"]
+        chord_only = {m for s in sections if s["texture"].startswith("chords")
+                      for m in range(s["start_measure"], s["end_measure"] + 1)}
+        moves: Dict[str, List[Dict[str, int]]] = {"rhythm": [], "harmony": []}
+        for v in range(max((len(m.voices) for m in track.measures), default=0)):
+            prev_route: Dict[Tuple[int, int], str] = {}
+            for m, b, beat in self._flat_voice(track, v):
+                route = {}
+                notes = sorted(beat.notes, key=lambda n: -n.realValue)
+                for i, n in enumerate(notes):
+                    key = (n.string, n.value)
+                    if n.type == NoteType.tie and key in prev_route:
+                        part = prev_route[key]
+                    elif m in chord_only:
+                        part = "rhythm"
+                    elif len(notes) == 1:
+                        part = "melody"
+                    else:
+                        top, second = notes[0].realValue, notes[1].realValue
+                        top_is_melody = top - second >= melody_gap or top >= melody_min_pitch
+                        if i == 0:
+                            part = "melody" if top_is_melody else "rhythm"
+                        elif (i == 1 and top_is_melody and n.realValue >= harmony_min_pitch
+                              and top - n.realValue <= harmony_max_interval):
+                            part = "harmony"
+                        else:
+                            part = "rhythm"
+                    route[key] = part
+                    if part != "melody" and m in measures:
+                        moves[part].append({"measure": m, "voice": v, "beat": b,
+                                            "string": n.string, "fret": n.value})
+                prev_route = route
+
+        tracks_before = list(self.current_song.tracks)
+        backup = self._copy_track(track)
+        result: Dict[str, Any] = {"melody_track": track_index, "rhythm_track": None, "harmony_track": None}
+        try:
+            for part, name in (("rhythm", rhythm_name), ("harmony", harmony_name)):
+                if moves[part]:
+                    split = self.split_track(track_index, "notes", name or f"{track.name} ({part.title()})",
+                                             notes=moves[part])
+                    result[f"{part}_track"] = split["track_index"]
+        except Exception:
+            self.current_song.tracks[:] = tracks_before
+            self.current_song.tracks[track_index] = backup
+            self._renumber_tracks()
+            raise
+        if melody_name:
+            track.name = melody_name
+        result["moved"] = {part: len(notes) for part, notes in moves.items()}
+        result["chord_only_measures"] = sorted(chord_only)
+        return result
+
     @staticmethod
     def _texture(counts: Dict[str, int], voices: int) -> str:
         if not counts:
@@ -174,7 +246,7 @@ class AnalysisOperationsController(EditOperationsController):
         Keeps every pitch. Searches the string choices for each beat and picks
         the sequence with the lowest total cost across the passage (stretch,
         movement, and a small cost per changed note, so playable fingerings
-        stay put). Tied and dead notes keep their string. With apply=True the
+        stay put). A tie chain moves string as a whole. With apply=True the
         edits are made through edit_notes.
         """
         track = self._track(track_index)
@@ -185,26 +257,13 @@ class AnalysisOperationsController(EditOperationsController):
         before = {"wide_stretch": 0, "string_clash": 0, "position_jump": 0}
         after = dict(before)
 
-        voice_count = max((len(track.measures[m].voices) for m in measures), default=0)
-        for v in range(voice_count):
-            seq = [(m, b, beat) for m in measures if v < len(track.measures[m].voices)
-                   for b, beat in enumerate(track.measures[m].voices[v].beats) if beat.notes]
-            if not seq:
-                continue
-            fixed = self._tied_notes(track, v)
-            options = []
-            for m, b, beat in seq:
-                current = tuple((n.string, n.value) for n in beat.notes)
-                cands = self._candidates(beat, tuning, track.fretCount, fixed)
-                if not cands:
-                    unplayable.append({"measure": m, "voice": v, "beat": b})
-                    cands = [current]
-                options.append((current, sorted(
-                    cands, key=lambda a: self._local_cost(a, current, max_fret_span))[:MAX_CANDIDATES]))
-
-            path = self._best_path(options, max_fret_span, max_position_jump)
+        for v, seq in self._voice_sequences(track, measures):
+            items = [[(n.realValue, (n.string, n.value)) for n in beat.notes] for _, _, beat, _ in seq]
+            path, bad = self._finger(seq, items, tuning, track.fretCount, max_fret_span, max_position_jump)
+            unplayable += [{"measure": seq[i][0], "voice": v, "beat": seq[i][1]} for i in bad]
             prev_cur = prev_new = None
-            for (m, b, beat), (current, _), chosen in zip(seq, options, path):
+            for (m, b, beat, _), chosen in zip(seq, path):
+                current = tuple((n.string, n.value) for n in beat.notes)
                 self._tally(before, current, prev_cur, max_fret_span, max_position_jump)
                 self._tally(after, chosen, prev_new, max_fret_span, max_position_jump)
                 prev_cur, prev_new = current, chosen
@@ -214,34 +273,217 @@ class AnalysisOperationsController(EditOperationsController):
                                       "fret": note.value, "new_string": s, "new_fret": f})
         if apply and edits:
             self.edit_notes(track_index, edits)
+            self._repair_ties(track)
         return {"edits": edits, "changed_notes": len(edits), "applied": bool(apply and edits),
                 "before": before, "after": after, "unplayable_beats": unplayable}
 
-    @staticmethod
-    def _tied_notes(track: Track, voice: int) -> set:
-        """ids of notes that are tied or tied into, which must keep their string."""
-        fixed, prev = set(), None
-        for measure in track.measures:
-            if voice >= len(measure.voices):
-                continue
-            for beat in measure.voices[voice].beats:
-                for note in beat.notes:
-                    if note.type == NoteType.tie:
-                        fixed.add(id(note))
-                        if prev:
-                            fixed.update(id(p) for p in prev.notes if p.string == note.string)
-                prev = beat
-        return fixed
+    def retune_track(self, track_index: int, tuning: Optional[List[int]] = None,
+                     fret_count: int = 24, octave_shift: bool = True, reduce_chords: bool = False,
+                     max_fret_span: int = 5, max_position_jump: int = 7) -> Dict[str, Any]:
+        """Change a track's tuning and fret count, keeping every pitch.
+
+        tuning lists the open-string MIDI pitches from string 1 (highest)
+        down; the default is standard 6-string guitar. Notes the new
+        instrument can't reach are moved by octaves when octave_shift is
+        true (otherwise the call fails). With reduce_chords, beats that can't
+        be fingered drop notes (held notes first, then doubled and inner
+        notes) until they can. Every note is then re-fingered as in
+        suggest_fingering. All-or-nothing.
+        """
+        track = self._track(track_index)
+        tuning = tuning or [64, 59, 55, 50, 45, 40]
+        new_tuning = {i + 1: p for i, p in enumerate(tuning)}
+        low, high = min(tuning), max(tuning) + fret_count
+
+        def fit(pitch: int) -> int:
+            while pitch > high:
+                pitch -= 12
+            while pitch < low:
+                pitch += 12
+            return pitch
+
+        def playable(notes) -> bool:
+            return bool(self._candidates([(fit(n.realValue), None) for n in notes],
+                                         new_tuning, fret_count, {}, set()))
+
+        work = self._copy_track(track)
+        dropped = []
+        if reduce_chords:
+            for v in range(max((len(m.voices) for m in work.measures), default=0)):
+                flat = self._flat_voice(work, v)
+                for k, (m, b, beat) in enumerate(flat):
+                    while beat.notes and not playable(beat.notes):
+                        # Drop the first note (in priority order) that makes the chord playable.
+                        order = self._drop_order(beat)
+                        note = next((n for n in order if playable([x for x in beat.notes if x is not n])),
+                                    order[0])
+                        dropped.append({"measure": m, "voice": v, "beat": b, "pitch": pitch_name(note.realValue)})
+                        self._take_chain(flat, k, note)
+
+        measures = range(len(work.measures))
+        shifted, plan, bad_beats = 0, [], []
+        for v, seq in self._voice_sequences(work, measures):
+            items = []
+            for m, b, beat, _ in seq:
+                item = []
+                for n in beat.notes:
+                    pitch = fit(n.realValue)
+                    if pitch != n.realValue:
+                        if not octave_shift:
+                            raise ValueError(f"Pitch {pitch_name(n.realValue)} at measure {m} beat {b} "
+                                             f"is out of range")
+                        shifted += 1
+                    current = ((n.string, n.value)
+                               if new_tuning.get(n.string, -99) + n.value == pitch and n.value <= fret_count
+                               else None)
+                    item.append((pitch, current))
+                items.append(item)
+            path, bad = self._finger(seq, items, new_tuning, fret_count, max_fret_span, max_position_jump)
+            bad_beats += [{"measure": seq[i][0], "voice": v, "beat": seq[i][1],
+                           "notes": len(seq[i][2].notes)} for i in bad]
+            plan += [(beat, path[i]) for i, (_, _, beat, _) in enumerate(seq)]
+        if bad_beats:
+            raise ValueError(f"{len(bad_beats)} beats can't be fingered on the new tuning "
+                             f"(too many notes for the strings), e.g. {bad_beats[:5]}; "
+                             f"use reduce_chords, or split or delete notes first")
+        changed = 0
+        work.strings = [GuitarString(i + 1, p) for i, p in enumerate(tuning)]
+        work.fretCount = fret_count
+        for beat, chosen in plan:
+            for note, (s, f) in zip(beat.notes, chosen):
+                changed += (s, f) != (note.string, note.value)
+                note.string, note.value = s, f
+        self._repair_ties(work)
+        self.current_song.tracks[track_index] = work
+        return {"strings": len(tuning), "fret_count": fret_count, "octave_shifted_notes": shifted,
+                "refingered_notes": changed, "dropped_notes": dropped}
 
     @staticmethod
-    def _candidates(beat: Beat, tuning: Dict[int, int], fret_count: int, fixed: set):
+    def _drop_order(beat: Beat) -> List[Any]:
+        """Notes of an unplayable chord, most expendable first: held, doubled, inner, top, bass."""
+        ordered = sorted(beat.notes, key=lambda n: n.realValue)
+        inner = ordered[1:-1]
+        classes = [n.realValue % 12 for n in ordered]
+        order = ([n for n in ordered if n.type == NoteType.tie]
+                 + [n for n in inner if classes.count(n.realValue % 12) > 1]
+                 + inner[::-1] + ordered[::-1])
+        seen = set()
+        return [n for n in order if id(n) not in seen and not seen.add(id(n))]
+
+    def _voice_sequences(self, track: Track, measures: range):
+        """Per voice: the beats with notes in the range, as (measure, beat, Beat, origins).
+
+        origins[i] is the index of the note in the previous sequence entry that
+        note i is tied from, "pinned" if it is tied to a note outside the
+        range (so it must keep its string), or None.
+        """
+        voice_count = max((len(m.voices) for m in track.measures), default=0)
+        for v in range(voice_count):
+            flat = [(m, b, beat) for m, measure in enumerate(track.measures) if v < len(measure.voices)
+                    for b, beat in enumerate(measure.voices[v].beats)]
+            seq, pins = [], set()
+            for k, (m, b, beat) in enumerate(flat):
+                prev = flat[k - 1][2] if k else None
+                in_range = m in measures
+                prev_in_range = k > 0 and flat[k - 1][0] in measures
+                origins = []
+                for note in beat.notes:
+                    origin = None
+                    if note.type == NoteType.tie and prev is not None:
+                        idx = next((i for i, p in enumerate(prev.notes) if p.string == note.string), None)
+                        if idx is not None:
+                            if in_range and prev_in_range:
+                                origin = idx
+                            elif in_range:
+                                origin = "pinned"
+                            elif prev_in_range:
+                                pins.add(id(prev.notes[idx]))
+                    origins.append(origin)
+                if in_range and beat.notes:
+                    seq.append((m, b, beat, origins))
+            # Notes tied into a beat after the range keep their string too.
+            seq = [(m, b, beat, ["pinned" if id(n) in pins else o for n, o in zip(beat.notes, origins)])
+                   for m, b, beat, origins in seq]
+            if seq:
+                yield v, seq
+
+    def _finger(self, seq, items, tuning: Dict[int, int], fret_count: int,
+                max_span: int, max_jump: int):
+        """Cheapest fingering for a sequence of beats (beam search over beats).
+
+        items[i] is [(pitch, current (string, fret) or None)] per note. Tied
+        notes are forced onto the string their origin was given. Returns the
+        chosen assignment per beat and the indexes of beats with no valid
+        fingering (those keep their current one).
+        """
+        layers, bad = [], []
+        for i, ((_, _, beat, origins), item) in enumerate(zip(seq, items)):
+            prev_layer = layers[-1] if layers else []
+            linked = [(n, o) for n, o in enumerate(origins) if isinstance(o, int)]
+            # Tied notes follow their origin, so group previous states by the strings they imply.
+            groups: Dict[Any, List[int]] = {}
+            for j, (a, _, _) in enumerate(prev_layer):
+                groups.setdefault(tuple(a[o][0] for _, o in linked), []).append(j)
+            if not groups:
+                groups[()] = []
+            current = [c for _, c in item]
+            layer = []
+            for key, js in groups.items():
+                forced = {n: s for (n, _), s in zip(linked, key)}
+                pinned = {n for n, o in enumerate(origins) if o == "pinned"}
+                cands = self._candidates(item, tuning, fret_count, forced, pinned)
+                cands = sorted(cands, key=lambda a: self._local_cost(a, current, max_span))[:MAX_CANDIDATES]
+                for a in cands:
+                    local = self._local_cost(a, current, max_span)
+                    if js:
+                        j = min(js, key=lambda j: prev_layer[j][1] + self._move_cost(prev_layer[j][0], a, max_jump))
+                        cost = prev_layer[j][1] + self._move_cost(prev_layer[j][0], a, max_jump) + local
+                    else:
+                        j, cost = None, local
+                    layer.append((a, cost, j))
+            if not layer and linked:
+                # The tied notes' strings block the rest of the chord: release the
+                # ties (they become re-attacks once _repair_ties sees the new strings).
+                pinned = {n for n, o in enumerate(origins) if o == "pinned"}
+                for a in sorted(self._candidates(item, tuning, fret_count, {}, pinned),
+                                key=lambda a: self._local_cost(a, current, max_span))[:MAX_CANDIDATES]:
+                    j = (min(range(len(prev_layer)), key=lambda j: prev_layer[j][1]
+                             + self._move_cost(prev_layer[j][0], a, max_jump)) if prev_layer else None)
+                    base = prev_layer[j][1] + self._move_cost(prev_layer[j][0], a, max_jump) if prev_layer else 0.0
+                    layer.append((a, base + self._local_cost(a, current, max_span), j))
+            if not layer:
+                bad.append(i)
+                fallback = tuple(c if c else (0, 0) for c in current)
+                j = min(range(len(prev_layer)), key=lambda j: prev_layer[j][1]) if prev_layer else None
+                layer = [(fallback, prev_layer[j][1] if prev_layer else 0.0, j)]
+            layers.append(sorted(layer, key=lambda x: x[1])[:MAX_CANDIDATES * 2])
+        k = 0
+        path = []
+        for layer in reversed(layers):
+            a, _, back = layer[k]
+            path.append(a)
+            k = back if back is not None else 0
+        return path[::-1], bad
+
+    @staticmethod
+    def _candidates(item, tuning: Dict[int, int], fret_count: int,
+                    forced: Dict[int, int], pinned: set):
         per_note = []
-        for note in beat.notes:
-            if id(note) in fixed or note.type == NoteType.dead or note.string not in tuning:
-                per_note.append([(note.string, note.value)])
+        for n, (pitch, current) in enumerate(item):
+            if n in forced:
+                s = forced[n]
+                f = pitch - tuning.get(s, 999)
+                per_note.append([(s, f)] if 0 <= f <= fret_count else [])
+            elif n in pinned and current:
+                per_note.append([current])
             else:
-                pitch = note.realValue
                 per_note.append([(s, pitch - t) for s, t in tuning.items() if 0 <= pitch - t <= fret_count])
+        # Bound the search on dense chords: keep each note's three lowest frets.
+        size = 1
+        for options in per_note:
+            size *= max(len(options), 1)
+        if size > 20000:
+            per_note = [sorted(o, key=lambda sf: sf[1])[:3] for o in per_note]
         return [a for a in itertools.product(*per_note) if len({s for s, _ in a}) == len(a)]
 
     @staticmethod
@@ -256,7 +498,7 @@ class AnalysisOperationsController(EditOperationsController):
 
     def _local_cost(self, assignment, current, max_span: int) -> float:
         span = self._span(assignment)
-        changes = sum(a != c for a, c in zip(assignment, current))
+        changes = sum(c is not None and a != c for a, c in zip(assignment, current))
         top = max((f for _, f in assignment), default=0)
         return 10 * max(0, span - max_span) + 0.5 * span + 1.0 * changes + 0.05 * top
 
@@ -266,27 +508,6 @@ class AnalysisOperationsController(EditOperationsController):
             return 0.0
         d = abs(pa - pb)
         return 0.3 * d + (5 if d > max_jump else 0)
-
-    def _best_path(self, options, max_span: int, max_jump: int):
-        """Cheapest sequence of fingerings (Viterbi over beats)."""
-        current, cands = options[0]
-        costs = [self._local_cost(a, current, max_span) for a in cands]
-        back = []
-        for current, cands_next in options[1:]:
-            new_costs, pointers = [], []
-            for a in cands_next:
-                local = self._local_cost(a, current, max_span)
-                i = min(range(len(cands)), key=lambda j: costs[j] + self._move_cost(cands[j], a, max_jump))
-                new_costs.append(costs[i] + self._move_cost(cands[i], a, max_jump) + local)
-                pointers.append(i)
-            back.append((cands, pointers))
-            cands, costs = cands_next, new_costs
-        i = min(range(len(cands)), key=costs.__getitem__)
-        path = [cands[i]]
-        for prev_cands, pointers in reversed(back):
-            i = pointers[i]
-            path.append(prev_cands[i])
-        return path[::-1]
 
     def _tally(self, counts, assignment, prev, max_span: int, max_jump: int) -> None:
         if self._span(assignment) > max_span:

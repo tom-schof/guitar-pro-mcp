@@ -36,12 +36,21 @@ class FileOperationsController(GuitarProMixin):
     def save_file(self, file_path: str) -> None:
         """Save the current song to a Guitar Pro file."""
         self._ensure_song_loaded()
+        self._check_writable()
         # Write to a temp file first so a failed write can't clobber the target.
         directory, name = os.path.split(os.path.abspath(file_path))
         fd, tmp_path = tempfile.mkstemp(dir=directory, prefix=f".{name}.", suffix=os.path.splitext(name)[1])
         os.close(fd)
         try:
             write(self.current_song, tmp_path)
+            # mkstemp creates owner-only files; keep the target's mode, or the umask default.
+            if os.path.exists(file_path):
+                mode = os.stat(file_path).st_mode & 0o777
+            else:
+                umask = os.umask(0)
+                os.umask(umask)
+                mode = 0o666 & ~umask
+            os.chmod(tmp_path, mode)
             os.replace(tmp_path, file_path)
         except BaseException:
             os.remove(tmp_path)
@@ -121,4 +130,26 @@ class FileOperationsController(GuitarProMixin):
             return False
         except Exception as e:
             print(f"Error importing from JSON: {e}")
-            return False 
+            return False
+
+    def _check_writable(self) -> None:
+        """Refuse songs the GP5 writer would silently corrupt.
+
+        Beats store their notes as a bitmask of strings, so two notes on one
+        string, or a note on a string the track doesn't have, shift every
+        byte after it and the file can't be read back.
+        """
+        problems = []
+        for t, track in enumerate(self.current_song.tracks):
+            count = len(track.strings)
+            for m, measure in enumerate(track.measures):
+                for v, voice in enumerate(measure.voices):
+                    for b, beat in enumerate(voice.beats):
+                        strings = [n.string for n in beat.notes]
+                        if len(strings) != len(set(strings)) or any(not 1 <= s <= count for s in strings):
+                            problems.append(f"track {t} measure {m} voice {v} beat {b} strings {sorted(strings)}")
+        if problems:
+            raise ValueError(f"{len(problems)} beats have two notes on one string or an invalid "
+                             f"string, which Guitar Pro files can't store (fix with suggest_fingering "
+                             f"or delete_notes): " + "; ".join(problems[:5]))
+

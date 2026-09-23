@@ -489,3 +489,73 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
                                                          max_fret_span, max_position_jump, apply)}
         except Exception as e:
             return {"status": "error", "message": f"Error suggesting fingering: {str(e)}"}
+
+    @mcp.tool("merge_voices")
+    def merge_voices(ctx: Context, track_index: int, start_measure: int = 0,
+                     end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Fold all voices of a track into voice 1, re-cutting rhythm with ties.
+
+        Do this before analyze_track/split_track when both voices hold parts
+        of the same line, so each beat shows everything sounding at that time.
+        """
+        try:
+            return {"status": "success",
+                    "data": controller.merge_voices(track_index, start_measure, end_measure)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error merging voices: {str(e)}"}
+
+    @mcp.tool("retune_track")
+    def retune_track(ctx: Context, track_index: int, tuning: Optional[List[int]] = None,
+                     fret_count: int = 24, octave_shift: bool = True,
+                     reduce_chords: bool = False) -> Dict[str, Any]:
+        """Change tuning (open-string MIDI pitches, string 1 first; default standard
+        6-string) and fret count, keeping pitches and re-fingering every note.
+        Out-of-range notes move by octaves if octave_shift; with reduce_chords,
+        chords too big for the strings drop held, doubled and inner notes
+        (reported in dropped_notes). All-or-nothing."""
+        try:
+            return {"status": "success",
+                    "data": controller.retune_track(track_index, tuning, fret_count, octave_shift,
+                                                    reduce_chords)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error retuning track: {str(e)}"}
+
+    @mcp.tool("make_monophonic")
+    def make_monophonic(ctx: Context, track_index: int, dest_track: Optional[int] = None,
+                        start_measure: int = 0, end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Keep one note per beat (the highest new note) for a single melody line.
+
+        Other new notes, with their ties, move to dest_track (or are deleted
+        without one); other held notes are cut short. All-or-nothing.
+        """
+        try:
+            return {"status": "success",
+                    "data": controller.make_monophonic(track_index, dest_track, start_measure, end_measure)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error making track monophonic: {str(e)}"}
+
+    @mcp.tool("split_parts")
+    def split_parts(ctx: Context, track_index: int, start_measure: int = 0,
+                    end_measure: Optional[int] = None, melody_min_pitch: int = 71,
+                    melody_gap: int = 5, harmony_min_pitch: int = 64,
+                    harmony_max_interval: int = 9, melody_name: Optional[str] = None,
+                    rhythm_name: Optional[str] = None,
+                    harmony_name: Optional[str] = None) -> Dict[str, Any]:
+        """Split a merged guitar part: melody stays on the track, chords go to a new
+        rhythm track, a second line under the melody goes to a new harmony track.
+
+        Chord tops count as melody when melody_gap+ semitones above the next
+        note or >= melody_min_pitch (MIDI); measures with only chords go to
+        rhythm. Typical pipeline: merge_voices, split_parts, make_monophonic
+        (melody, dest_track=harmony), retune_track(reduce_chords=true) and
+        suggest_fingering(apply=true) on each part, save_guitar_pro.
+        """
+        try:
+            return {"status": "success",
+                    "data": controller.split_parts(track_index, start_measure, end_measure,
+                                                   melody_min_pitch, melody_gap, harmony_min_pitch,
+                                                   harmony_max_interval, melody_name, rhythm_name,
+                                                   harmony_name)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error splitting parts: {str(e)}"}
+

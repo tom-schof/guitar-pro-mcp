@@ -1,8 +1,15 @@
 import copy
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base_controller import GuitarProMixin
-from guitarpro.models import Beat, BeatStatus, Note, NoteType, Track
+from guitarpro.models import (Beat, BeatEffect, BeatStatus, Duration, Note, NoteEffect, NoteType,
+                              Track, Tuplet)
+
+# Note values a merged beat can take, longest first: plain and dotted, then triplets.
+_STRAIGHT = sorted((Duration(value=v, isDotted=d) for v in (1, 2, 4, 8, 16, 32, 64) for d in (False, True)),
+                   key=lambda d: -d.time)
+_TRIPLET = sorted(_STRAIGHT + [Duration(value=v, tuplet=Tuplet(3, 2)) for v in (1, 2, 4, 8, 16, 32, 64)],
+                  key=lambda d: -d.time)
 
 class EditOperationsController(GuitarProMixin):
     """Controller for reading and restructuring existing song content.
@@ -57,7 +64,7 @@ class EditOperationsController(GuitarProMixin):
 
     @staticmethod
     def _repair_ties(track: Track) -> None:
-        """Turn tie notes whose preceding beat has no note on that string into normal notes.
+        """Turn tie notes whose preceding beat has no matching note (same string and fret) into normal notes.
 
         Deleting or moving a note can strand the notes tied to it; Guitar Pro
         would otherwise draw a tie from nothing.
@@ -69,9 +76,9 @@ class EditOperationsController(GuitarProMixin):
                     prev = None
                     continue
                 for beat in measure.voices[v].beats:
-                    held = {n.string for n in prev.notes} if prev else set()
+                    held = {(n.string, n.value) for n in prev.notes} if prev else set()
                     for note in beat.notes:
-                        if note.type == NoteType.tie and note.string not in held:
+                        if note.type == NoteType.tie and (note.string, note.value) not in held:
                             note.type = NoteType.normal
                     prev = beat
 
@@ -172,6 +179,35 @@ class EditOperationsController(GuitarProMixin):
 
     # ----- track structure -----------------------------------------------
 
+    def _copy_track(self, track: Track) -> Track:
+        """Deep-copy a track, sharing the song and measure headers."""
+        memo = {id(self.current_song): self.current_song}
+        for header in self.current_song.measureHeaders:
+            memo[id(header)] = header
+        return copy.deepcopy(track, memo)
+
+    @staticmethod
+    def _flat_voice(track: Track, voice: int):
+        """Every (measure, beat index, Beat) of one voice, in playing order."""
+        return [(m, b, beat) for m, measure in enumerate(track.measures) if voice < len(measure.voices)
+                for b, beat in enumerate(measure.voices[voice].beats)]
+
+    def _take_chain(self, flat, k: int, note: Note) -> List[Tuple[int, int, Note]]:
+        """Remove a note and the tie notes that continue it; return (measure, beat, note)s."""
+        taken = []
+        while True:
+            m, b, beat = flat[k]
+            beat.notes = [n for n in beat.notes if n is not note]
+            self._refresh_status(beat)
+            taken.append((m, b, note))
+            k += 1
+            if k >= len(flat):
+                return taken
+            note = next((n for n in flat[k][2].notes
+                         if n.type == NoteType.tie and n.string == note.string), None)
+            if note is None:
+                return taken
+
     def duplicate_track(self, track_index: int, name: Optional[str] = None,
                         clear_notes: bool = False) -> int:
         """Deep-copy a track (measures, notes, tuning, settings) and append it.
@@ -181,11 +217,7 @@ class EditOperationsController(GuitarProMixin):
         """
         source = self._track(track_index)
         song = self.current_song
-        # Share the song and measure headers instead of copying them.
-        memo = {id(song): song}
-        for header in song.measureHeaders:
-            memo[id(header)] = header
-        new_track = copy.deepcopy(source, memo)
+        new_track = self._copy_track(source)
         new_track.name = name or f"{source.name} (copy)"
         new_track.channel.channel, new_track.channel.effectChannel = self._free_channels(source)
         if clear_notes:
@@ -350,8 +382,8 @@ class EditOperationsController(GuitarProMixin):
                 for v, voice in enumerate(src.measures[m].voices):
                     for b, beat in enumerate(voice.beats):
                         picked = self._split_pick(beat, mode, split_pitch, strings, min_gap)
-                        selected += [{"measure": m, "voice": v, "beat": b, "string": n.string}
-                                     for n in picked]
+                        selected += [{"measure": m, "voice": v, "beat": b, "string": n.string,
+                                      "fret": n.value} for n in picked]
             if not selected:
                 raise ValueError("No notes matched; nothing changed")
         if dest_track is None:
@@ -381,3 +413,163 @@ class EditOperationsController(GuitarProMixin):
         if len(ordered) >= 2:
             return [ordered[0]] if ordered[0].realValue - ordered[1].realValue >= min_gap else []
         return [ordered[0]] if split_pitch is not None and ordered[0].realValue >= split_pitch else []
+
+    # ----- voices --------------------------------------------------------
+
+    def merge_voices(self, track_index: int, start_measure: int = 0,
+                     end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Fold every voice into voice 0, re-cutting the rhythm.
+
+        Each measure is cut wherever any voice starts or ends a beat. A note
+        still sounding across a cut continues as a tie note, and a pitch
+        played in both voices is kept once. Measures whose cuts can't be
+        written as note values are left unchanged and reported.
+        """
+        track = self._track(track_index)
+        last = len(track.measures) - 1 if end_measure is None else min(end_measure, len(track.measures) - 1)
+        merged, skipped = [], []
+        for m in range(start_measure, last + 1):
+            measure = track.measures[m]
+            if len(measure.voices) < 2 or not any(b.notes for v in measure.voices[1:] for b in v.beats):
+                continue
+            new_beats = self._merged_beats(measure)
+            if new_beats is None:
+                skipped.append(m)
+                continue
+            measure.voices[0].beats = new_beats
+            for voice in measure.voices[1:]:
+                voice.beats = [Beat(voice, duration=Duration(value=4), status=BeatStatus.empty)]
+            merged.append(m)
+        self._repair_ties(track)
+        return {"merged_measures": len(merged), "skipped_measures": skipped}
+
+    @staticmethod
+    def _merged_beats(measure) -> Optional[List[Beat]]:
+        length = measure.header.length
+        spans = []
+        for v, voice in enumerate(measure.voices):
+            t = 0
+            for beat in voice.beats:
+                end = t + beat.duration.time
+                if t < length:
+                    spans.append((t, min(end, length), v, beat))
+                t = end
+        cuts = sorted({0, length} | {s for s, _, _, _ in spans} | {e for _, e, _, _ in spans})
+        segments = []  # (start, end, [(note, is_onset)])
+        kept: Dict[int, Note] = {}  # pitch -> note kept in the previous segment
+        for start, end in zip(cuts, cuts[1:]):
+            sounding = [(n, s == start, v) for s, e, v, beat in spans if s <= start < e
+                        for n in beat.notes if s == start or n.type != NoteType.dead]
+            # One note per pitch: prefer a fresh attack, then the note already
+            # sounding (so its tie chain stays on one string), then voice 0.
+            by_pitch: Dict[int, Any] = {}
+            for n, onset, v in sorted(sounding, key=lambda x: (not x[1], kept.get(x[0].realValue) is not x[0], x[2])):
+                by_pitch.setdefault(n.realValue, (n, onset))
+            kept = {p: n for p, (n, _) in by_pitch.items()}
+            if not by_pitch and segments and not segments[-1][2]:
+                segments[-1] = (segments[-1][0], end, [])  # extend the previous rest
+            else:
+                segments.append((start, end, list(by_pitch.values())))
+        voice = measure.voices[0]
+        onset_beats = {s: beat for s, _, v, beat in sorted(spans, key=lambda x: -x[2])}
+        new_beats = []
+        for start, end, notes in segments:
+            pieces = EditOperationsController._split_duration(end - start)
+            if pieces is None:
+                return None
+            source = onset_beats.get(start)
+            for k, duration in enumerate(pieces):
+                first = k == 0 and source is not None
+                beat = Beat(voice, duration=duration,
+                            effect=copy.deepcopy(source.effect) if first else BeatEffect(),
+                            text=source.text if first else None,
+                            status=BeatStatus.normal if notes else BeatStatus.rest)
+                for n, onset in notes:
+                    attack = onset and k == 0
+                    beat.notes.append(Note(beat, value=n.value, velocity=n.velocity, string=n.string,
+                                           effect=copy.deepcopy(n.effect) if attack else NoteEffect(),
+                                           durationPercent=n.durationPercent,
+                                           type=n.type if attack else NoteType.tie))
+                new_beats.append(beat)
+        return new_beats
+
+    @staticmethod
+    def _split_duration(ticks: int) -> Optional[List[Duration]]:
+        """Write a length in ticks as tied note values (greedy, triplets only if needed)."""
+        for table in (_STRAIGHT, _TRIPLET):
+            pieces, left = [], ticks
+            while left > 0:
+                d = next((d for d in table if d.time <= left), None)
+                if d is None:
+                    break
+                pieces.append(copy.deepcopy(d))
+                left -= d.time
+            if left == 0:
+                return pieces
+        return None
+
+    def make_monophonic(self, track_index: int, dest_track: Optional[int] = None,
+                        start_measure: int = 0, end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Leave one note per beat: the highest new note (or the highest held note).
+
+        Other new notes, with the tie notes that continue them, move to
+        dest_track (onto another string if theirs is taken) or are deleted
+        when no dest_track is given. Other held notes are cut short.
+        All-or-nothing.
+        """
+        track = self._track(track_index)
+        dest = self._track(dest_track) if dest_track is not None else None
+        if dest_track == track_index:
+            raise ValueError("dest_track must differ from track_index")
+        work = self._copy_track(track)
+        work_dest = self._copy_track(dest) if dest is not None else None
+        last = len(work.measures) - 1 if end_measure is None else min(end_measure, len(work.measures) - 1)
+        counts = {"moved": 0, "deleted": 0, "cut": 0}
+        for v in range(max((len(m.voices) for m in work.measures), default=0)):
+            flat = self._flat_voice(work, v)
+            for k, (m, b, beat) in enumerate(flat):
+                if not start_measure <= m <= last or len(beat.notes) < 2:
+                    continue
+                attacks = [n for n in beat.notes if n.type != NoteType.tie]
+                keep = max(attacks or beat.notes, key=lambda n: n.realValue)
+                for note in [n for n in beat.notes if n is not keep]:
+                    chain = self._take_chain(flat, k, note)
+                    if note.type == NoteType.tie:
+                        counts["cut"] += 1
+                    elif work_dest is None:
+                        counts["deleted"] += 1
+                    else:
+                        self._transfer(chain, work, work_dest, v)
+                        counts["moved"] += 1
+        self._repair_ties(work)
+        self.current_song.tracks[track_index] = work
+        if work_dest is not None:
+            self._repair_ties(work_dest)
+            self.current_song.tracks[dest_track] = work_dest
+        return counts
+
+    def _transfer(self, chain: List[Tuple[int, int, Note]], src: Track, dst: Track, voice: int) -> None:
+        """Put removed notes into the beats of dst that start at the same ticks."""
+        string = None
+        for m, b, note in chain:
+            tick = self._beat_ticks(src.measures[m].voices[voice])[b]
+            dst_voice = dst.measures[m].voices[voice]
+            ticks = self._beat_ticks(dst_voice)
+            if tick not in ticks:
+                raise ValueError(f"dest_track has no beat at tick {tick} in measure {m}")
+            dst_beat = dst_voice.beats[ticks.index(tick)]
+            pitch = note.realValue
+            used = {n.string for n in dst_beat.notes}
+            if string is None:
+                # Same string if free, else any free string that reaches the pitch.
+                options = [note.string] + [s.number for s in dst.strings if s.number != note.string]
+                string = next((s for s in options if s not in used
+                               and 0 <= pitch - self._tuning(dst, s) <= dst.fretCount), None)
+                if string is None:
+                    raise ValueError(f"No free string for {pitch} in dest_track at measure {m}")
+            elif string in used:
+                raise ValueError(f"dest_track string {string} is taken at measure {m}")
+            note.beat, note.string, note.value = dst_beat, string, pitch - self._tuning(dst, string)
+            dst_beat.notes.append(note)
+            self._refresh_status(dst_beat)
+

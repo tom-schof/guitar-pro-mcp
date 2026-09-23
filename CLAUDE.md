@@ -26,10 +26,11 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   `GuitarProMixin` (`base_controller.py`).
 - `src/controllers/guitar_pro/edit_operations.py`: the tools we added to edit existing songs
   (`get_measures`, `find_playability_issues`, `duplicate_track`, `delete_track`, `delete_notes`,
-  `edit_notes`, `add_notes`, `move_notes`, `split_track`).
+  `edit_notes`, `add_notes`, `move_notes`, `split_track`, `merge_voices`, `make_monophonic`).
 - `src/controllers/guitar_pro/analysis_operations.py`: `analyze_track` (does a track mix melody
-  and chords, and where should it be split) and `suggest_fingering` (re-finger a passage with the
-  same pitches, searching across neighbouring beats).
+  and chords, and where should it be split), `split_parts` (melody/rhythm/harmony),
+  `suggest_fingering` (re-finger a passage with the same pitches, searching across neighbouring
+  beats) and `retune_track` (new tuning and fret count; same pitches, re-fingered).
 - `src/utils/`: MIDI and JSON export and import.
 - `tests/`: pytest. The tests build a song, write it to `.gp5`, reload it and check the result.
 - `references/`: local reference docs, gitignored (e.g. `references/Guitar-Pro-8-user-guide.pdf`).
@@ -46,9 +47,12 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   0-based, matching the output of `get_measures`. `string` is 1-based, as in Guitar Pro, and
   `voice` defaults to 0. Batch operations check every address before changing anything, so a
   batch either fully succeeds or changes nothing.
-- Workflow for a merged part: run `analyze_track`, then `split_track` using the suggested mode
-  and pitch (run it per measure range with `dest_track` if sections differ), then
-  `find_playability_issues` and `suggest_fingering` on each part. `split_track` creates a copy
+- Arranging a merged transcription (what mandolin-anthem does): `merge_voices` →
+  `split_parts` → `make_monophonic(melody, dest_track=harmony)` →
+  `retune_track(reduce_chords=true)` and `suggest_fingering(apply=true)` on each part → save to
+  a **new** file. `analyze_track` and `find_playability_issues` show what to fix. For finer
+  control, `split_track` can split by pitch, top note, string or explicit notes, one measure
+  range at a time with `dest_track`. `split_track` creates a copy
   with the same rhythm but no notes (`duplicate_track(clear_notes=True)`) and uses `move_notes`,
   which needs a destination beat that starts at the same tick and has the same duration. Measure
   headers are shared, so all tracks stay in time.
@@ -67,8 +71,16 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   using a field, and test by saving and reloading.
 - A new measure has no beats. `_fill_rests` gives voice 0 one rest per time-signature beat, so
   `add_notes` has beats to address.
-- Tie notes (`NoteType.tie`) need a note on the same string in the previous beat. Deleting or
-  moving notes calls `_repair_ties`.
+- Tie notes (`NoteType.tie`) need a note on the same string and fret in the previous beat.
+  Deleting, moving or re-fingering notes calls `_repair_ties`, which turns stranded ties into
+  normal notes. The fingering search moves a tie chain onto one string as a whole, and only
+  releases a tie when the chord can't be fingered otherwise.
+- **Two notes on one string in a beat can't be saved.** GP5 stores a beat's notes as a string
+  bitmask, so the writer produces a corrupt file without raising. `save_file` refuses such songs
+  (`_check_writable`). `merge_voices` can create these clashes; `retune_track` or
+  `suggest_fingering` resolve them. When two notes clash, add `"fret"` to the address.
+- `attrs` models compare by value, so `list.remove`, `in` and `.index` on beats and notes can
+  match the wrong object. Use identity (`is`).
 - `save_file` writes to a temp file and then renames it. Keep it that way, because a failed
   PyGuitarPro write leaves a partial file.
 
@@ -89,5 +101,7 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   repeats and chords are lost.
 - `add_note_with_effects` works but isn't exposed as a tool. No tool changes the effects on
   existing notes, and no tool changes rhythm.
-- The `analyze_track` and `suggest_fingering` heuristics are only tested on synthetic songs.
-  Tune them against the real mandolin-anthem transcription.
+- The melody, harmony and rhythm thresholds in `split_parts` (B4, a fourth, E4, a sixth) and the
+  fingering costs were tuned on one song (mandolin-anthem). Check them by ear and eye in Guitar
+  Pro, and keep them as parameters.
+- New tracks are appended at the end. No tool reorders tracks.

@@ -140,3 +140,115 @@ def test_suggest_fingering_reports_unplayable_beats(ctl):
     beat.notes += [Note(beat, value=f, string=s, type=NoteType.normal) for s, f in [(6, 3), (6, 8), (3, 4)]]
     result = ctl.suggest_fingering(0, 1, 1)
     assert result["unplayable_beats"] == [{"measure": 1, "voice": 0, "beat": 0}]
+
+
+def two_voice_measure(ctl):
+    """Measure 0: voice 0 holds a half-note C chord; voice 1 plays four eighths then a half."""
+    measure = ctl.current_song.tracks[0].measures[0]
+    v0, v1 = measure.voices
+    v0.beats = [Beat(v0, duration=Duration(value=2), status=BeatStatus.normal),
+                Beat(v0, duration=Duration(value=2), status=BeatStatus.rest)]
+    v0.beats[0].notes = [Note(v0.beats[0], value=f, string=s, type=NoteType.normal) for s, f in CHORD]
+    v1.beats = [Beat(v1, duration=Duration(value=8), status=BeatStatus.normal) for _ in range(4)]
+    v1.beats.append(Beat(v1, duration=Duration(value=2), status=BeatStatus.normal))
+    for beat, fret in zip(v1.beats, [12, 10, 8, 7, 5]):
+        beat.notes = [Note(beat, value=fret, string=1, type=NoteType.normal)]
+
+
+def test_merge_voices_recuts_rhythm_with_ties(ctl):
+    two_voice_measure(ctl)
+    assert ctl.merge_voices(0, 0, 0) == {"merged_measures": 1, "skipped_measures": []}
+    roundtrip(ctl)
+    measure = ctl.current_song.tracks[0].measures[0]
+    beats = measure.voices[0].beats
+    assert [b.duration.value for b in beats] == [8, 8, 8, 8, 2]
+    assert sorted((n.string, n.value, n.type.name) for n in beats[1].notes) == \
+        [(1, 10, "normal")] + [(s, f, "tie") for s, f in sorted(CHORD)]
+    assert [n.value for n in beats[4].notes] == [5]
+    assert not any(b.notes for b in measure.voices[1].beats)
+
+
+def test_retune_seven_string_to_six_with_octave_drop(ctl):
+    track = ctl.current_song.tracks[0]
+    track.strings.append(gp.models.GuitarString(7, 35))
+    track.fretCount = 30
+    beats = track.measures[1].voices[0].beats
+    beats[0].notes = [Note(beats[0], value=5, string=7, type=NoteType.normal)]    # E2 on string 7
+    beats[1].notes = [Note(beats[1], value=5, string=7, type=NoteType.tie)]      # tied on
+    beats[2].notes = [Note(beats[2], value=28, string=1, type=NoteType.normal)]  # G#6: above fret 24
+    result = ctl.retune_track(0, fret_count=24)
+    roundtrip(ctl)
+    track = ctl.current_song.tracks[0]
+    assert len(track.strings) == 6 and track.fretCount == 24
+    assert result["octave_shifted_notes"] == 1
+    beats = track.measures[1].voices[0].beats
+    assert [(n.string, n.value, n.type) for n in beats[0].notes + beats[1].notes] == \
+        [(6, 0, NoteType.normal), (6, 0, NoteType.tie)]
+    assert beats[2].notes[0].realValue == 64 + 28 - 12
+    # Everything else kept its pitch and fits the new neck.
+    assert all(0 <= n.value <= 24 and n.string <= 6 for m in track.measures
+               for v in m.voices for b in v.beats for n in b.notes)
+    # The open C with melody at fret 12 (an 11-fret stretch) is re-voiced, same pitches.
+    chord = track.measures[0].voices[0].beats[0].notes
+    assert sorted(n.realValue for n in chord) == [48, 52, 55, 60, 76]
+    assert ctl.suggest_fingering(0)["after"]["wide_stretch"] == 0
+
+
+def test_retune_refuses_too_many_notes(ctl):
+    beat = ctl.current_song.tracks[0].measures[2].voices[0].beats[1]
+    beat.notes = [Note(beat, value=f, string=s, type=NoteType.normal)
+                  for s, f in [(1, 0), (2, 0), (3, 0), (4, 0), (5, 0), (6, 0), (6, 2)]]
+    with pytest.raises(ValueError, match="can't be fingered"):
+        ctl.retune_track(0)
+    assert notes_at(ctl, 0, 2, 1)[-1] == (6, 2)
+
+
+def test_split_parts_melody_harmony_rhythm(ctl):
+    beat = ctl.current_song.tracks[0].measures[1].voices[0].beats[0]
+    beat.notes.append(Note(beat, value=9, string=2, type=NoteType.normal))  # G#4 under the melody
+    beat.notes = [n for n in beat.notes if n.string != 2 or n.value == 9]
+    result = ctl.split_parts(0, melody_name="Melody")
+    roundtrip(ctl)
+    names = [t.name for t in ctl.current_song.tracks]
+    assert names == ["Melody", "Merged (Rhythm)", "Merged (Harmony)"]
+    assert result["moved"] == {"rhythm": 31, "harmony": 1}
+    assert notes_at(ctl, 0, 1, 0) == [(1, 12)]
+    assert notes_at(ctl, 0, 1, 1) == [(1, 10)]
+    assert notes_at(ctl, 2, 1, 0) == [(2, 9)]
+    assert notes_at(ctl, 1, 0, 0) == sorted(CHORD)
+
+
+def test_make_monophonic_cuts_held_and_moves_extra_notes(ctl):
+    beats = ctl.current_song.tracks[0].measures[0].voices[0].beats
+    for beat in beats:
+        beat.notes = [n for n in beat.notes if n.string == 1]
+    # Beat 1: melody note held from beat 0 (tie) plus a new higher note.
+    beats[1].notes = [Note(beats[1], value=12, string=1, type=NoteType.tie),
+                      Note(beats[1], value=5, string=2, type=NoteType.normal),
+                      Note(beats[1], value=15, string=3, type=NoteType.normal)]
+    other = ctl.duplicate_track(0, "Harmony", clear_notes=True)
+    result = ctl.make_monophonic(0, dest_track=other, end_measure=0)
+    assert result == {"moved": 1, "deleted": 0, "cut": 1}
+    roundtrip(ctl)
+    assert [n.realValue for n in ctl.current_song.tracks[0].measures[0].voices[0].beats[1].notes] == [70]
+    assert [n.realValue for n in ctl.current_song.tracks[other].measures[0].voices[0].beats[1].notes] == [64]
+
+
+def test_reduce_chords_drops_only_the_blocking_note(ctl):
+    beat = ctl.current_song.tracks[0].measures[2].voices[0].beats[0]
+    # C6 and D#6 both need string 1 on a 24-fret guitar.
+    beat.notes = [Note(beat, value=f, string=s, type=NoteType.normal)
+                  for s, f in [(5, 3), (3, 0), (1, 20), (2, 28)]]
+    ctl.current_song.tracks[0].fretCount = 30
+    result = ctl.retune_track(0, reduce_chords=True)
+    assert [d["pitch"] for d in result["dropped_notes"]] == ["C6"]
+    kept = ctl.current_song.tracks[0].measures[2].voices[0].beats[0].notes
+    assert sorted(n.realValue for n in kept) == [48, 55, 87]
+
+
+def test_save_refuses_string_clash(ctl):
+    beat = ctl.current_song.tracks[0].measures[0].voices[0].beats[1]
+    beat.notes.append(Note(beat, value=3, string=1, type=NoteType.normal))
+    with pytest.raises(ValueError, match="two notes on one string"):
+        ctl.save_file(str(ctl.tmp / "bad.gp5"))
+    assert not (ctl.tmp / "bad.gp5").exists()
