@@ -2,9 +2,14 @@
 MCP server for Guitar Pro file manipulation.
 """
 
+import builtins
+import functools
 import logging
 import os
 import sys
+
+# stdout carries the MCP stdio protocol; send any stray print() output to stderr.
+builtins.print = functools.partial(builtins.print)
 
 # Add necessary paths for imports
 script_dir = os.path.dirname(os.path.abspath(__file__))
