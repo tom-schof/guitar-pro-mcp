@@ -147,3 +147,14 @@ def test_failed_save_keeps_existing_file(ctl, monkeypatch):
         ctl.save_file(str(path))
     assert path.read_bytes() == original
     assert os.listdir(ctl.tmp) == ["keep.gp5"]
+
+
+def test_changing_instrument_clears_amp_preset(ctl):
+    track = ctl.current_song.tracks[0]
+    track.rse.instrument.effect = "British Vintage - Screamer Overdrive"
+    track.rse.instrument.effectCategory = "Amp Tones"
+    ctl.set_track_properties(0, instrument=27)
+    roundtrip(ctl)
+    track = ctl.current_song.tracks[0]
+    assert track.channel.instrument == 27
+    assert (track.rse.instrument.instrument, track.rse.instrument.effect) == (27, "")

@@ -135,6 +135,11 @@ class TrackOperationsController(GuitarProMixin):
             if instrument is not None:
                 if 0 <= instrument <= 127:
                     track.channel.instrument = instrument
+                    # The RSE sound and amp preset belong to the old instrument
+                    # (e.g. an overdrive preset would stay on a clean guitar).
+                    track.rse.instrument.instrument = instrument
+                    track.rse.instrument.effect = ''
+                    track.rse.instrument.effectCategory = ''
                 else:
                     print("Instrument must be between 0 and 127")
                     return False
