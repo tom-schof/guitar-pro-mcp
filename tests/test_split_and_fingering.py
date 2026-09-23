@@ -237,16 +237,18 @@ def test_make_monophonic_cuts_held_and_moves_extra_notes(ctl):
     assert [n.realValue for n in ctl.current_song.tracks[other].measures[0].voices[0].beats[1].notes] == [64]
 
 
-def test_reduce_chords_drops_only_the_blocking_note(ctl):
+def test_reduce_chords_moves_the_blocking_note_an_octave(ctl):
     beat = ctl.current_song.tracks[0].measures[2].voices[0].beats[0]
     # C6 and D#6 both need string 1 on a 24-fret guitar.
     beat.notes = [Note(beat, value=f, string=s, type=NoteType.normal)
                   for s, f in [(5, 3), (3, 0), (1, 20), (2, 28)]]
     ctl.current_song.tracks[0].fretCount = 30
     result = ctl.retune_track(0, reduce_chords=True)
-    assert [d["pitch"] for d in result["dropped_notes"]] == ["C6"]
+    assert result["dropped_notes"] == []
+    assert [(d["from"], d["to"]) for d in result["chord_notes_moved_octave"]] == [("C6", "C5")]
+    roundtrip(ctl)
     kept = ctl.current_song.tracks[0].measures[2].voices[0].beats[0].notes
-    assert sorted(n.realValue for n in kept) == [48, 55, 87]
+    assert sorted(n.realValue for n in kept) == [48, 55, 72, 87]
 
 
 def test_save_refuses_string_clash(ctl):

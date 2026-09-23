@@ -277,8 +277,9 @@ class AnalysisOperationsController(EditOperationsController):
         down; the default is standard 6-string guitar. Notes the new
         instrument can't reach are moved by octaves when octave_shift is
         true (otherwise the call fails). With reduce_chords, beats that can't
-        be fingered drop notes (held notes first, then doubled and inner
-        notes) until they can. Every note is then re-fingered as in
+        be fingered first move a note an octave (reported in
+        chord_notes_moved_octave), and only if that fails drop notes (held
+        notes first, then doubled and inner notes) until they can. Every note is then re-fingered as in
         suggest_fingering. All-or-nothing.
         """
         track = self._track(track_index)
@@ -293,19 +294,32 @@ class AnalysisOperationsController(EditOperationsController):
                 pitch += 12
             return pitch
 
-        def playable(notes) -> bool:
-            return bool(self._candidates([(fit(n.realValue), None) for n in notes],
-                                         new_tuning, fret_count, {}, set()))
+        def playable(notes, extra: Optional[int] = None) -> bool:
+            pitches = [fit(n.realValue) for n in notes] + ([extra] if extra is not None else [])
+            return bool(self._candidates([(p, None) for p in pitches], new_tuning, fret_count, {}, set()))
 
         work = self._copy_track(track)
-        dropped = []
+        dropped, octaved = [], []
         if reduce_chords:
             for v in range(max((len(m.voices) for m in work.measures), default=0)):
                 flat = self._flat_voice(work, v)
                 for k, (m, b, beat) in enumerate(flat):
                     while beat.notes and not playable(beat.notes):
-                        # Drop the first note (in priority order) that makes the chord playable.
                         order = self._drop_order(beat)
+                        # Prefer moving one note an octave (down, then up) over dropping it.
+                        moved = next(((n, d) for n in order for d in (-12, 12)
+                                      if n.type != NoteType.tie and low <= n.realValue + d <= high
+                                      and playable([x for x in beat.notes if x is not n], extra=n.realValue + d)),
+                                     None)
+                        if moved:
+                            note, d = moved
+                            octaved.append({"measure": m, "voice": v, "beat": b,
+                                            "from": pitch_name(note.realValue),
+                                            "to": pitch_name(note.realValue + d)})
+                            for _, n in self._chain(flat, k, note):
+                                n.value += d  # string is re-chosen by the fingering pass
+                            continue
+                        # Otherwise drop the first note (in priority order) that makes it playable.
                         note = next((n for n in order if playable([x for x in beat.notes if x is not n])),
                                     order[0])
                         dropped.append({"measure": m, "voice": v, "beat": b, "pitch": pitch_name(note.realValue)})
@@ -325,7 +339,7 @@ class AnalysisOperationsController(EditOperationsController):
                                              f"is out of range")
                         shifted += 1
                     current = ((n.string, n.value)
-                               if new_tuning.get(n.string, -99) + n.value == pitch and n.value <= fret_count
+                               if new_tuning.get(n.string, -99) + n.value == pitch and 0 <= n.value <= fret_count
                                else None)
                     item.append((pitch, current))
                 items.append(item)
@@ -347,7 +361,8 @@ class AnalysisOperationsController(EditOperationsController):
         self._repair_ties(work)
         self.current_song.tracks[track_index] = work
         return {"strings": len(tuning), "fret_count": fret_count, "octave_shifted_notes": shifted,
-                "refingered_notes": changed, "dropped_notes": dropped}
+                "refingered_notes": changed, "chord_notes_moved_octave": octaved,
+                "dropped_notes": dropped}
 
     @staticmethod
     def _drop_order(beat: Beat) -> List[Any]:

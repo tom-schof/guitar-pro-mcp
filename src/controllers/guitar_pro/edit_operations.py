@@ -192,6 +192,18 @@ class EditOperationsController(GuitarProMixin):
         return [(m, b, beat) for m, measure in enumerate(track.measures) if voice < len(measure.voices)
                 for b, beat in enumerate(measure.voices[voice].beats)]
 
+    @staticmethod
+    def _chain(flat, k: int, note: Note) -> List[Tuple[int, Note]]:
+        """A note at flat[k] and the tie notes that continue it, as (flat index, note)."""
+        chain = [(k, note)]
+        for j in range(k + 1, len(flat)):
+            note = next((n for n in flat[j][2].notes
+                         if n.type == NoteType.tie and n.string == note.string and n.value == note.value), None)
+            if note is None:
+                break
+            chain.append((j, note))
+        return chain
+
     def _take_chain(self, flat, k: int, note: Note) -> List[Tuple[int, int, Note]]:
         """Remove a note and the tie notes that continue it; return (measure, beat, note)s."""
         taken = []

@@ -48,9 +48,12 @@ uv --directory ~/dev/guitar-pro-mcp run -m src.run_mcp_server
   `voice` defaults to 0. Batch operations check every address before changing anything, so a
   batch either fully succeeds or changes nothing.
 - Arranging a merged transcription (what mandolin-anthem does): `merge_voices` (only if two
-  voices carry the part) → `split_parts` → `duplicate_track(lead, clear_notes=true)` as a harmony
-  track → `make_monophonic(lead, dest_track=harmony)` → `retune_track(reduce_chords=true)` and
-  `suggest_fingering(apply=true)` on each part → save to a **new** file. Split by role and
+  voices carry the part) → `split_parts` → `retune_track(reduce_chords=true)` and
+  `suggest_fingering(apply=true)` on each part → save to a **new** file. **Preserve detail.** The
+  user rejected a version where `make_monophonic` moved the lead's double-stops and held notes
+  into a harmony track. Keep the lead's double-stops, and change pitch only by octaves when a
+  note won't fit the neck. Check the result by comparing every note (including ties) with the
+  source. Split by role and
   continuity, not pitch alone: taking the top note of each beat shreds arpeggios across tracks.
   That was the first attempt, and the user described the result as "gibberish". Start from a
   MIDI-based `.gp5` export (single voice, 16th grid). The MusicXML import was full of
