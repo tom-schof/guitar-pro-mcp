@@ -49,3 +49,6 @@ Thumbs.db
 .uv.lock
 
 
+
+# Local reference docs (e.g. Guitar Pro 8 user guide); not committed
+references/
