@@ -55,16 +55,16 @@ class TrackOperationsController(GuitarProMixin):
         logger.info(f"Track has {len(track.measures)} measures")
         
         for measure_index, measure in enumerate(track.measures):
-            logger.info(f"Processing measure {measure_index}")
-            logger.info(f"Measure has {len(measure.voices)} voices")
+            logger.debug(f"Processing measure {measure_index}")
+            logger.debug(f"Measure has {len(measure.voices)} voices")
             
             for voice_index, voice in enumerate(measure.voices):
-                logger.info(f"Processing voice {voice_index}")
-                logger.info(f"Voice has {len(voice.beats)} beats")
+                logger.debug(f"Processing voice {voice_index}")
+                logger.debug(f"Voice has {len(voice.beats)} beats")
                 
                 for beat_index, beat in enumerate(voice.beats):
-                    logger.info(f"Processing beat {beat_index}")
-                    logger.info(f"Beat has {len(beat.notes)} notes")
+                    logger.debug(f"Processing beat {beat_index}")
+                    logger.debug(f"Beat has {len(beat.notes)} notes")
                     
                     for note in beat.notes:
                         note_info = {
@@ -78,7 +78,7 @@ class TrackOperationsController(GuitarProMixin):
                             "is_rest": beat.duration.isRest,
                             "has_tie": note.isTiedNote
                         }
-                        logger.info(f"Found note: {note_info}")
+                        logger.debug(f"Found note: {note_info}")
                         notes.append(note_info)
         
         logger.info(f"Total notes found in track: {len(notes)}")

@@ -1,5 +1,5 @@
 from .base_controller import GuitarProMixin
-from guitarpro.models import Note, Beat, Voice, Duration
+from guitarpro.models import Note, Beat, BeatStatus, Voice, Duration, NoteType
 
 class NoteOperationsController(GuitarProMixin):
     """Controller for Guitar Pro note operations."""
@@ -60,9 +60,11 @@ class NoteOperationsController(GuitarProMixin):
             note = Note(beat)
             note.value = fret
             note.string = string
+            note.type = NoteType.normal
             
             # Add the note to the beat
             beat.notes.append(note)
+            beat.status = BeatStatus.normal
             
             return True
         
@@ -118,8 +120,10 @@ class NoteOperationsController(GuitarProMixin):
         # Create the note
         note = Note(beat)
         note.string = string
+        note.type = NoteType.normal
         note.value = fret
         beat.notes.append(note)
+        beat.status = BeatStatus.normal
         
         return True 
 
@@ -217,6 +221,7 @@ class NoteOperationsController(GuitarProMixin):
             note = Note(beat)
             note.value = fret
             note.string = string
+            note.type = NoteType.normal
             
             # Set advanced effects
             if is_bend:
@@ -238,6 +243,7 @@ class NoteOperationsController(GuitarProMixin):
             
             # Add the note to the beat
             beat.notes.append(note)
+            beat.status = BeatStatus.normal
             
             return True
         

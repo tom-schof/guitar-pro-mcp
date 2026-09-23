@@ -25,18 +25,7 @@ class FileOperationsController(GuitarProMixin):
                 logger.info(f"- Name: {track.name}")
                 logger.info(f"- Strings: {len(track.strings)}")
                 logger.info(f"- Measures: {len(track.measures)}")
-                
-                # Log measure details
-                for j, measure in enumerate(track.measures):
-                    logger.info(f"  Measure {j}:")
-                    logger.info(f"  - Voices: {len(measure.voices)}")
-                    for k, voice in enumerate(measure.voices):
-                        logger.info(f"    Voice {k}:")
-                        logger.info(f"    - Beats: {len(voice.beats)}")
-                        for l, beat in enumerate(voice.beats):
-                            logger.info(f"      Beat {l}:")
-                            logger.info(f"      - Notes: {len(beat.notes)}")
-                            
+
         except Exception as e:
             logger.error(f"Error loading file: {e}")
             raise

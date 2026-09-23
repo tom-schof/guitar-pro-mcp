@@ -349,3 +349,85 @@ def setup_mcp_tools(mcp: FastMCP, controller) -> None:
             return {"status": "success", "data": structure}
         except Exception as e:
             return {"status": "error", "message": f"Error getting song structure: {str(e)}"}
+    # ----- editing existing content --------------------------------------
+    # Notes are addressed as {"measure": int, "voice": int, "beat": int, "string": int}
+    # (0-based measure/voice/beat as returned by get_measures; 1-based string).
+
+    @mcp.tool("get_measures")
+    def get_measures(ctx: Context, track_index: int, start_measure: int = 0,
+                     end_measure: Optional[int] = None) -> Dict[str, Any]:
+        """Get beats and notes (string, fret, MIDI pitch, tick offset) for a measure range (end inclusive)."""
+        try:
+            return {"status": "success",
+                    "data": controller.get_measures(track_index, start_measure, end_measure)}
+        except Exception as e:
+            return {"status": "error", "message": f"Error getting measures: {str(e)}"}
+
+    @mcp.tool("find_playability_issues")
+    def find_playability_issues(ctx: Context, track_index: int, max_fret_span: int = 5,
+                                max_position_jump: int = 7) -> Dict[str, Any]:
+        """Flag string clashes, too many notes, wide stretches, big position jumps and multi-voice measures."""
+        try:
+            issues = controller.find_playability_issues(track_index, max_fret_span, max_position_jump)
+            return {"status": "success", "count": len(issues), "data": issues}
+        except Exception as e:
+            return {"status": "error", "message": f"Error finding playability issues: {str(e)}"}
+
+    @mcp.tool("duplicate_track")
+    def duplicate_track(ctx: Context, track_index: int, name: Optional[str] = None) -> Dict[str, Any]:
+        """Copy a track with all its notes. Split a merged part by duplicating it, then deleting notes from each copy."""
+        try:
+            new_index = controller.duplicate_track(track_index, name)
+            return {"status": "success", "message": f"Duplicated track {track_index}", "track_index": new_index}
+        except Exception as e:
+            return {"status": "error", "message": f"Error duplicating track: {str(e)}"}
+
+    @mcp.tool("delete_track")
+    def delete_track(ctx: Context, track_index: int) -> Dict[str, Any]:
+        """Delete a track. Later track indexes shift down by one."""
+        try:
+            controller.delete_track(track_index)
+            return {"status": "success", "message": f"Deleted track {track_index}"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error deleting track: {str(e)}"}
+
+    @mcp.tool("delete_notes")
+    def delete_notes(ctx: Context, track_index: int, notes: List[Dict[str, int]]) -> Dict[str, Any]:
+        """Delete notes by address. Beats left empty become rests. All-or-nothing."""
+        try:
+            count = controller.delete_notes(track_index, notes)
+            return {"status": "success", "message": f"Deleted {count} notes"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error deleting notes: {str(e)}"}
+
+    @mcp.tool("edit_notes")
+    def edit_notes(ctx: Context, track_index: int, edits: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Re-finger notes: each edit is an address plus new_string and/or new_fret.
+
+        With only new_string, the fret is recalculated to keep the same pitch
+        (set keep_pitch=false to keep the fret instead). All-or-nothing.
+        """
+        try:
+            count = controller.edit_notes(track_index, edits)
+            return {"status": "success", "message": f"Edited {count} notes"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error editing notes: {str(e)}"}
+
+    @mcp.tool("add_notes")
+    def add_notes(ctx: Context, track_index: int, notes: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Add notes to existing beats: address plus fret (optional velocity, type). All-or-nothing."""
+        try:
+            count = controller.add_notes(track_index, notes)
+            return {"status": "success", "message": f"Added {count} notes"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error adding notes: {str(e)}"}
+
+    @mcp.tool("move_notes")
+    def move_notes(ctx: Context, source_track: int, dest_track: int,
+                   notes: List[Dict[str, int]]) -> Dict[str, Any]:
+        """Move notes to the beat at the same measure/voice/tick in another track. All-or-nothing."""
+        try:
+            count = controller.move_notes(source_track, dest_track, notes)
+            return {"status": "success", "message": f"Moved {count} notes"}
+        except Exception as e:
+            return {"status": "error", "message": f"Error moving notes: {str(e)}"}
